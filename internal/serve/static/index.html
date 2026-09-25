@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Static pages — upload</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, system-ui, sans-serif; max-width: 560px;
+         margin: 3rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.3rem; }
+  label { display: block; margin: 1rem 0 .3rem; font-weight: 600; }
+  input[type=text], input[type=file] { width: 100%; box-sizing: border-box;
+         padding: .5rem; margin-bottom: .5rem; }
+  button { padding: .6rem 1.4rem; font-size: 1rem; cursor: pointer; }
+  #result { margin-top: 1.5rem; padding: 1rem; border-radius: 6px; display: none; }
+  .ok { background: #e6f6e6; } .err { background: #fbe9e9; }
+  .hint { color: gray; font-size: .85rem; }
+</style>
+</head>
+<body>
+<h1>Publish a static page</h1>
+<p class="hint">Upload a single HTML file or a zip pack (Figma/Framer export, browser save-as).
+A new immutable page is created every time.</p>
+
+<label for="token">API token</label>
+<input type="text" id="token" placeholder="bearer token">
+
+<label for="identifier">Identifier (optional)</label>
+<input type="text" id="identifier" placeholder="landing-page → landing-page-1">
+
+<label for="file">HTML file or zip pack</label>
+<input type="file" id="file" accept=".html,.htm,.zip">
+
+<button id="go">Upload</button>
+<div id="result"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const result = $("result");
+$("token").value = localStorage.getItem("sp-token") || "";
+$("go").onclick = async () => {
+  const token = $("token").value.trim();
+  localStorage.setItem("sp-token", token);
+  const file = $("file").files[0];
+  result.className = ""; result.style.display = "block";
+  if (!file) { result.classList.add("err"); result.textContent = "Choose a file first."; return; }
+  const fd = new FormData();
+  fd.append("file", file);
+  if ($("identifier").value.trim()) fd.append("identifier", $("identifier").value.trim());
+  $("go").disabled = true; $("go").textContent = "Uploading…";
+  try {
+    const res = await fetch("/api/pages", {
+      method: "POST",
+      headers: { "Authorization": "Bearer " + token },
+      body: fd,
+    });
+    const body = await res.json().catch(() => ({}));
+    if (res.status === 201) {
+      result.classList.add("ok");
+      result.innerHTML = "Published: <a href='" + body.url + "'>" + body.slug + "</a>";
+    } else {
+      result.classList.add("err");
+      result.textContent = "Error " + res.status + ": " + (body.error || res.statusText || "upload failed");
+    }
+  } catch (e) {
+    result.classList.add("err"); result.textContent = "Upload failed: " + e;
+  } finally {
+    $("go").disabled = false; $("go").textContent = "Upload";
+  }
+};
+</script>
+</body>
+</html>

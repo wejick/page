@@ -1,0 +1,59 @@
+schema: spec-driven
+
+# Project context — shown to AI when creating artifacts.
+context: |
+  Project: static-page-hosting — internal self-serve static page publisher.
+  Upload an HTML pack (single HTML or zip from Figma/Framer exports, browser
+  save-as) → assign slug → bake assets at ingest (best-effort) → serve at an
+  immutable URL. Path-based serving on one origin; in prod a CDN fronts the
+  bucket's byte paths, Go handles upload/ingest/API.
+
+  Tech stack:
+  - Go (latest stable), stdlib-first: net/http ServeMux with 1.22 pattern
+    routing — no router framework, no web framework
+  - Postgres via pgx/v5 (write-side only: slug registry, asset manifest,
+    counters) — no ORM
+  - Object storage: S3-compatible wire protocol via minio-go behind the ONE
+    justified seam (Storage, 4 methods); MinIO in dev via docker compose;
+    production vendor deliberately undecided — any S3-compatible endpoint
+  - testcontainers-go: real MinIO + Postgres for integration tests
+  - Frontend: one hand-written HTML page, fetch + FormData; no build step,
+    no framework, no npm
+
+  Engineering principles (enforced, not aspirational):
+  - No over-engineering: ship the smallest thing that satisfies the spec.
+    No speculative abstraction, no config knob without a scenario that needs
+    it, no dependency without a direct consumer. Every addition traces to a
+    requirement; if it doesn't, it's cut.
+  - The only code seam is Storage (Put/Get/Stat/DeletePrefix) — it exists
+    because the storage vendor is an open requirement and has multiple real
+    implementations (s3compat for dev+prod, mem for unit tests). BANNED beyond
+    it: clean/onion/hexagonal architecture, interfaces over a single
+    implementation, repository/service indirection, DI containers/factories,
+    port/adapter seams, re-export barrel files. Code is flat and concrete:
+    cmd/server + internal/<capability> packages (storage, slug, ingest,
+    upload, serve); functions import and call what they use directly (pgx,
+    minio-go, net/http as-is).
+  - Proper tests: every implementation task ships with its tests in the same
+    task. Unit tests run against the mem driver and fixture packs on disk;
+    integration tests run real MinIO + Postgres via testcontainers. Mock the
+    external asset fetcher's HTTP and nothing else — never our own internal
+    interfaces. No live network in CI.
+  - Go best practices: gofmt + go vet clean; table-driven tests; errors
+    wrapped with %w; context propagated on every call that does I/O;
+    exhaustive fixture coverage for the ingest scanner.
+
+# Per-artifact rules (optional)
+rules:
+  proposal:
+    - Keep proposals under 400 words; the Non-goals section is mandatory
+  design:
+    - Every decision includes an "alternatives considered" line
+    - If a decision adds a dependency or a config knob, name the requirement
+      it serves — otherwise it violates the no-over-engineering principle
+  specs:
+    - Every requirement has at least one testable scenario
+  tasks:
+    - Every implementation task pairs with its tests (same checkbox or an
+      adjacent one); no task without an acceptance check
+    - Tasks sized to ~2 hours max; split larger ones
