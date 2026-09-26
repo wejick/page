@@ -2,9 +2,7 @@
 
 ## Purpose
 Token-authenticated upload API and minimal ajax UI for HTML/zip packs, with validation and zip-safety checks.
-
 ## Requirements
-
 ### Requirement: Upload via ajax API
 The system SHALL expose `POST /api/pages` accepting multipart form data with a file (single `.html` or `.zip`) and an optional identifier, authenticated by a bearer token, returning `201` with the assigned slug, page URL, and asset summary. Requests without a valid token MUST be rejected with `401`.
 
@@ -39,13 +37,3 @@ The system SHALL enforce upload caps (max raw size, max decompressed size, max f
 - **WHEN** a zip contains another zip entry
 - **THEN** the API returns `422` and stores nothing
 
-### Requirement: Minimal upload UI
-The system SHALL serve a single HTML page at `/` that uploads via `fetch` with `FormData`, and displays the resulting page URL on success or the error message on failure. The UI MUST NOT require any build step or framework.
-
-#### Scenario: Successful upload shows URL
-- **WHEN** a user drops a valid pack onto the upload page and submits
-- **THEN** the page displays the new page's URL as a clickable link
-
-#### Scenario: Failed upload shows error
-- **WHEN** an upload is rejected (e.g. bad token, oversize)
-- **THEN** the page displays the API's error message without losing the form state

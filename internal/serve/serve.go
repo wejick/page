@@ -59,11 +59,13 @@ func New(o Options) http.Handler {
 		if o.Upload != nil {
 			mux.Handle("POST /api/pages", o.Upload.Create())
 			mux.Handle("GET /api/pages/{slug}", o.Upload.Get())
+			mux.Handle("GET /api/pages", o.Upload.List())
 		}
-		// Park/unpark toggle (auth inside the handler).
+		// Park/unpark toggle and hard delete (auth inside the handler).
 		if o.Lifecycle != nil {
 			mux.Handle("POST /api/pages/{slug}/park", o.Lifecycle.Park())
 			mux.Handle("POST /api/pages/{slug}/unpark", o.Lifecycle.Unpark())
+			mux.Handle("DELETE /api/pages/{slug}", o.Lifecycle.Delete())
 		}
 	}
 	pages := func() {

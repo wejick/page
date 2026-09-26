@@ -14,7 +14,7 @@ import (
 // fetch failures never fail the upload.
 func TestUploadBakingWiring(t *testing.T) {
 	ctx := context.Background()
-	h, store := newTestHandler(t, ctx, 0)
+	h, store, _ := newTestHandler(t, ctx, 0)
 
 	html := `<!doctype html><html><head>` +
 		`<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter">` +

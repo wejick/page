@@ -21,22 +21,38 @@ make seed    # uploads a sample Framer-style pack (no server needed)
 open http://localhost:8080/p/sample-1/
 ```
 
-## Upload HTML
+## Manage pages
 
-Open `http://localhost:8080/`, enter token `devtoken`, optionally set an
-identifier, and drop an `.html` file or a `.zip`:
+Open `http://localhost:8080/`, enter token `devtoken`, and you get the
+management UI: every page with its lifecycle status, the full asset manifest
+per page, park/unpark, and permanent delete. Upload lives there too —
+optionally set an identifier and drop an `.html` file or a `.zip`:
 
-![Web admin — upload a page](screenshot.png)
+![Web admin — manage pages](screenshot.png)
 
 Or use the API:
 
 ```bash
+# Upload (→ 201 {"slug":"landing-page-1","url":"/p/landing-page-1/",...})
 curl -H "Authorization: Bearer devtoken" -F "file=@pack.zip" \
      -F "identifier=landing-page" http://localhost:8080/api/pages
-# → 201 {"slug":"landing-page-1","url":"/p/landing-page-1/",...}
+
+# List pages (paginated: ?limit=&offset=&status=)
+curl -H "Authorization: Bearer devtoken" http://localhost:8080/api/pages
+
+# Page detail with the full asset manifest
+curl -H "Authorization: Bearer devtoken" http://localhost:8080/api/pages/landing-page-1
+
+# Take down (serves 404) / restore
+curl -H "Authorization: Bearer devtoken" -X POST http://localhost:8080/api/pages/landing-page-1/park
+curl -H "Authorization: Bearer devtoken" -X POST http://localhost:8080/api/pages/landing-page-1/unpark
+
+# Delete permanently (objects + metadata; refuse while a transition runs)
+curl -H "Authorization: Bearer devtoken" -X DELETE http://localhost:8080/api/pages/landing-page-1
 ```
 
-The page is served at `/p/{slug}/`.
+The page is served at `/p/{slug}/`. Deleting a page frees its slug's storage
+but never reuses its code — slug counters only move forward.
 
 ## Basic configuration
 

@@ -146,15 +146,19 @@ func TestPlaneScopedRouting(t *testing.T) {
 		{name: "serve: no upload UI", mode: config.ModeServe, path: "/", wantStatus: 404},
 		{name: "serve: no upload API", mode: config.ModeServe, method: http.MethodPost, path: "/api/pages", wantStatus: 404},
 		{name: "serve: no page status API", mode: config.ModeServe, path: "/api/pages/s-1", wantStatus: 404},
+		{name: "serve: no page list API", mode: config.ModeServe, path: "/api/pages", wantStatus: 404},
 		{name: "serve: no park", mode: config.ModeServe, method: http.MethodPost, path: "/api/pages/s-1/park", wantStatus: 404},
+		{name: "serve: no delete", mode: config.ModeServe, method: http.MethodDelete, path: "/api/pages/s-1", wantStatus: 404},
 
 		// admin: /, /api/*, /healthz only.
 		{name: "admin: upload UI", mode: config.ModeAdmin, path: "/", wantStatus: 200},
 		{name: "admin: healthz", mode: config.ModeAdmin, path: "/healthz", wantStatus: 200},
 		{name: "admin: upload API mounted", mode: config.ModeAdmin, method: http.MethodPost, path: "/api/pages", wantStatus: 401},
 		{name: "admin: page status API mounted", mode: config.ModeAdmin, path: "/api/pages/s-1", wantStatus: 401},
+		{name: "admin: page list API mounted", mode: config.ModeAdmin, path: "/api/pages", wantStatus: 401},
 		{name: "admin: park mounted", mode: config.ModeAdmin, method: http.MethodPost, path: "/api/pages/s-1/park", wantStatus: 401},
 		{name: "admin: unpark mounted", mode: config.ModeAdmin, method: http.MethodPost, path: "/api/pages/s-1/unpark", wantStatus: 401},
+		{name: "admin: delete mounted", mode: config.ModeAdmin, method: http.MethodDelete, path: "/api/pages/s-1", wantStatus: 401},
 		{name: "admin: no page serving", mode: config.ModeAdmin, path: "/p/s-1/", wantStatus: 404},
 		{name: "admin: no asset serving", mode: config.ModeAdmin, path: "/a/s-1/assets/hero.png", wantStatus: 404},
 		{name: "admin: no slashless redirect", mode: config.ModeAdmin, path: "/p/s-1", wantStatus: 404},
@@ -165,7 +169,9 @@ func TestPlaneScopedRouting(t *testing.T) {
 		{name: "all: asset", mode: config.ModeAll, path: "/a/s-1/assets/hero.png", wantStatus: 200},
 		{name: "all: healthz", mode: config.ModeAll, path: "/healthz", wantStatus: 200},
 		{name: "all: upload API mounted", mode: config.ModeAll, method: http.MethodPost, path: "/api/pages", wantStatus: 401},
+		{name: "all: page list API mounted", mode: config.ModeAll, path: "/api/pages", wantStatus: 401},
 		{name: "all: park mounted", mode: config.ModeAll, method: http.MethodPost, path: "/api/pages/s-1/park", wantStatus: 401},
+		{name: "all: delete mounted", mode: config.ModeAll, method: http.MethodDelete, path: "/api/pages/s-1", wantStatus: 401},
 
 		// The zero-value Mode behaves as all.
 		{name: "zero value: upload UI", mode: config.Mode(""), path: "/", wantStatus: 200},

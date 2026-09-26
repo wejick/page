@@ -30,12 +30,36 @@ func (a *API) Park() http.Handler { return http.HandlerFunc(a.park) }
 // Unpark handles POST /api/pages/{slug}/unpark.
 func (a *API) Unpark() http.Handler { return http.HandlerFunc(a.unpark) }
 
+// Delete handles DELETE /api/pages/{slug}: permanent removal, not a toggle.
+func (a *API) Delete() http.Handler { return http.HandlerFunc(a.remove) }
+
 func (a *API) park(w http.ResponseWriter, r *http.Request) {
 	a.toggle(w, r, a.svc.Park)
 }
 
 func (a *API) unpark(w http.ResponseWriter, r *http.Request) {
 	a.toggle(w, r, a.svc.Unpark)
+}
+
+// remove is Delete's handler. Unlike the toggles it returns no terminal
+// status (the row is gone), and its 409 message names any in-flight
+// transition rather than an "opposite" one — delete blocks on both
+// directions.
+func (a *API) remove(w http.ResponseWriter, r *http.Request) {
+	if !a.auth(w, r) {
+		return
+	}
+	switch err := a.svc.Delete(r.Context(), r.PathValue("slug")); {
+	case err == nil:
+		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+	case isNotFound(err):
+		http.NotFound(w, r)
+	case isBusy(err):
+		http.Error(w, "lifecycle transition in progress, retry shortly", http.StatusConflict)
+	default:
+		slog.Error("lifecycle", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	}
 }
 
 func (a *API) toggle(w http.ResponseWriter, r *http.Request, run func(ctx context.Context, slug string) (string, error)) {

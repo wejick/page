@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -52,6 +53,9 @@ func (h *Handler) Create() http.Handler { return http.HandlerFunc(h.create) }
 
 // Get handles GET /api/pages/{slug}.
 func (h *Handler) Get() http.Handler { return http.HandlerFunc(h.get) }
+
+// List handles GET /api/pages.
+func (h *Handler) List() http.Handler { return http.HandlerFunc(h.list) }
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	if !h.auth(w, r) {
@@ -208,6 +212,33 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 		"status": meta.Status,
 		"assets": assets,
 	})
+}
+
+// list serves the paginated page list for the management UI
+// (add-admin-management-ui D4). Garbage limit/offset values fall back to the
+// defaults; db.ListPages does the clamping.
+func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
+	if !h.auth(w, r) {
+		return
+	}
+	q := r.URL.Query()
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	offset, _ := strconv.Atoi(q.Get("offset"))
+	pages, total, err := db.ListPages(r.Context(), h.pool, q.Get("status"), limit, offset)
+	if err != nil {
+		h.fail(w, r, "list pages", err)
+		return
+	}
+	items := make([]map[string]any, 0, len(pages))
+	for _, p := range pages {
+		items = append(items, map[string]any{
+			"slug": p.Slug, "identifier": p.Identifier, "code": p.Code,
+			"status": p.Status, "asset_count": p.AssetCount,
+			"total_bytes": p.TotalBytes, "created_at": p.CreatedAt,
+			"url": "/p/" + p.Slug + "/",
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"total": total, "pages": items})
 }
 
 // putObjects stores the normalized entry and every asset under {slug}/.

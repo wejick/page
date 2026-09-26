@@ -21,7 +21,7 @@ import (
 	"page/internal/storage/mem"
 )
 
-func newTestHandler(t *testing.T, ctx context.Context, rawCap int64) (*Handler, *mem.Store) {
+func newTestHandler(t *testing.T, ctx context.Context, rawCap int64) (*Handler, *mem.Store, *pgxpool.Pool) {
 	t.Helper()
 	pgc, err := postgres.Run(ctx, "postgres:17-alpine",
 		postgres.WithDatabase("page"), postgres.WithUsername("page"),
@@ -60,7 +60,7 @@ func newTestHandler(t *testing.T, ctx context.Context, rawCap int64) (*Handler, 
 		},
 		Token: "secret",
 	})
-	return h, store
+	return h, store, pool
 }
 
 func multipartBody(t *testing.T, filename string, content []byte, fields map[string]string) (*bytes.Buffer, string) {
@@ -105,6 +105,16 @@ func getMeta(h *Handler, slug string) *httptest.ResponseRecorder {
 	return rec
 }
 
+func getList(h *Handler, query, token string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest("GET", "/api/pages"+query, nil)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	h.List().ServeHTTP(rec, req)
+	return rec
+}
+
 func mustTestZip(t *testing.T, files map[string]string) []byte {
 	t.Helper()
 	buf := &bytes.Buffer{}
@@ -126,7 +136,7 @@ func mustTestZip(t *testing.T, files map[string]string) []byte {
 
 func TestUploadAuth(t *testing.T) {
 	ctx := context.Background()
-	h, store := newTestHandler(t, ctx, 0)
+	h, store, _ := newTestHandler(t, ctx, 0)
 	body, ctype := multipartBody(t, "p.html", []byte("<h1>x</h1>"), nil)
 
 	if rec := post(h, body, ctype, ""); rec.Code != http.StatusUnauthorized {
@@ -148,7 +158,7 @@ func TestUploadAuth(t *testing.T) {
 
 func TestSingleHTMLHappyPath(t *testing.T) {
 	ctx := context.Background()
-	h, _ := newTestHandler(t, ctx, 0)
+	h, _, _ := newTestHandler(t, ctx, 0)
 	body, ctype := multipartBody(t, "page.html", []byte("<h1>landing</h1>"),
 		map[string]string{"identifier": "landing-page"})
 
@@ -177,7 +187,7 @@ func TestSingleHTMLHappyPath(t *testing.T) {
 
 func TestIdentifierOmitted(t *testing.T) {
 	ctx := context.Background()
-	h, _ := newTestHandler(t, ctx, 0)
+	h, _, _ := newTestHandler(t, ctx, 0)
 	body, ctype := multipartBody(t, "p.html", []byte("<h1>x</h1>"), nil)
 	if rec := post(h, body, ctype, "secret"); rec.Code != 201 ||
 		!bytes.Contains(rec.Body.Bytes(), []byte(`"slug":"page-1"`)) {
@@ -187,7 +197,7 @@ func TestIdentifierOmitted(t *testing.T) {
 
 func TestZipPackManifest(t *testing.T) {
 	ctx := context.Background()
-	h, store := newTestHandler(t, ctx, 0)
+	h, store, _ := newTestHandler(t, ctx, 0)
 
 	zipBytes := mustTestZip(t, map[string]string{
 		"index.html":      `<html><head><link rel="stylesheet" href="style.css"></head><body><img src="assets/hero.png"></body></html>`,
@@ -219,7 +229,7 @@ func TestZipPackManifest(t *testing.T) {
 
 func TestRejections(t *testing.T) {
 	ctx := context.Background()
-	h, store := newTestHandler(t, ctx, 0)
+	h, store, _ := newTestHandler(t, ctx, 0)
 
 	cases := []struct {
 		name    string
@@ -249,7 +259,7 @@ func TestRejections(t *testing.T) {
 		t.Fatalf("traversal status = %d, want 422", rec.Code)
 	}
 	// Oversize raw → 413.
-	h2, _ := newTestHandler(t, ctx, 16)
+	h2, _, _ := newTestHandler(t, ctx, 16)
 	body2, ctype2 := multipartBody(t, "big.html", bytes.Repeat([]byte("x"), 64), nil)
 	if rec := post(h2, body2, ctype2, "secret"); rec.Code != 413 {
 		t.Fatalf("oversize status = %d, want 413", rec.Code)
@@ -257,5 +267,82 @@ func TestRejections(t *testing.T) {
 	// Nothing was stored anywhere across all rejections.
 	if n := store.Len(); n != 0 {
 		t.Errorf("%d objects stored after rejections, want 0", n)
+	}
+}
+
+func TestListEndpoint(t *testing.T) {
+	ctx := context.Background()
+	h, _, pool := newTestHandler(t, ctx, 0)
+
+	// Unauthenticated list: 401 before any I/O.
+	if rec := getList(h, "", ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("no token status = %d, want 401", rec.Code)
+	}
+
+	// Empty list: zero total, empty (non-null) array.
+	rec := getList(h, "", "secret")
+	if rec.Code != http.StatusOK || !bytes.Contains(rec.Body.Bytes(), []byte(`"total":0`)) ||
+		!bytes.Contains(rec.Body.Bytes(), []byte(`"pages":[]`)) {
+		t.Fatalf("empty list status=%d body=%s, want 200 total:0 pages:[]", rec.Code, rec.Body)
+	}
+
+	// Three uploads across two identifiers; upload order gives created_at order.
+	for _, ident := range []string{"alpha", "alpha", "beta"} {
+		body, ctype := multipartBody(t, "p.html", []byte("<h1>"+ident+"</h1>"),
+			map[string]string{"identifier": ident})
+		if rec := post(h, body, ctype, "secret"); rec.Code != http.StatusCreated {
+			t.Fatalf("upload %s: %d body=%s", ident, rec.Code, rec.Body)
+		}
+	}
+	// Park alpha-1 out-of-band to give the filter something to find.
+	if _, err := pool.Exec(ctx,
+		`UPDATE pages SET status = 'parked' WHERE slug = 'alpha-1'`); err != nil {
+		t.Fatalf("force parked: %v", err)
+	}
+
+	// Full list: total 3, newest first (beta-1 last uploaded), with url + status.
+	rec = getList(h, "", "secret")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list status = %d body=%s", rec.Code, rec.Body)
+	}
+	body := rec.Body.Bytes()
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"total":3`)) {
+		t.Fatalf("missing total in %s", body)
+	}
+	first := bytes.Index(body, []byte(`"slug":"beta-1"`))
+	second := bytes.Index(body, []byte(`"slug":"alpha-2"`))
+	third := bytes.Index(body, []byte(`"slug":"alpha-1"`))
+	if first < 0 || second < 0 || third < 0 || !(first < second && second < third) {
+		t.Fatalf("order wrong in %s", body)
+	}
+	for _, want := range []string{`"url":"/p/beta-1/"`, `"status":"parked"`, `"asset_count":0`} {
+		if !bytes.Contains(rec.Body.Bytes(), []byte(want)) {
+			t.Fatalf("missing %s in %s", want, body)
+		}
+	}
+
+	// Window: limit=2&offset=1 skips the newest, total stays 3.
+	rec = getList(h, "?limit=2&offset=1", "secret")
+	body = rec.Body.Bytes()
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"total":3`)) ||
+		bytes.Contains(rec.Body.Bytes(), []byte(`"slug":"beta-1"`)) ||
+		!bytes.Contains(rec.Body.Bytes(), []byte(`"slug":"alpha-2"`)) {
+		t.Fatalf("window wrong in %s", body)
+	}
+
+	// Status filter: only the parked page, filtered total.
+	rec = getList(h, "?status=parked", "secret")
+	body = rec.Body.Bytes()
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"total":1`)) ||
+		!bytes.Contains(rec.Body.Bytes(), []byte(`"slug":"alpha-1"`)) ||
+		bytes.Contains(rec.Body.Bytes(), []byte(`"slug":"alpha-2"`)) {
+		t.Fatalf("filter wrong in %s", body)
+	}
+
+	// Garbage and oversized params degrade gracefully (db clamps).
+	for _, q := range []string{"?limit=abc", "?offset=-5", "?limit=100000"} {
+		if rec := getList(h, q, "secret"); rec.Code != http.StatusOK {
+			t.Fatalf("GET %s status = %d body=%s, want 200", q, rec.Code, rec.Body)
+		}
 	}
 }

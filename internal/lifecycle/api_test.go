@@ -34,6 +34,22 @@ func TestAPIRejectsUnauthenticated(t *testing.T) {
 		t.Fatalf("wrong token status = %d, want 401", resp.StatusCode)
 	}
 
+	// Same for delete: no token, wrong token.
+	for _, token := range []string{"", "wrong"} {
+		req, _ := http.NewRequest("DELETE", srv.URL+"/api/pages/x-1", nil)
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("DELETE: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("delete token %q status = %d, want 401", token, resp.StatusCode)
+		}
+	}
+
 	// Traversal and empty slugs are treated as unknown pages.
 	api2 := NewAPI(nil, "secret")
 	srv2 := httptest.NewServer(api2.Unpark())

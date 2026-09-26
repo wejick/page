@@ -243,3 +243,70 @@ func TestMigrateUpgradeFrom0001DefaultsLive(t *testing.T) {
 		}
 	}
 }
+
+// The 0002→0003 upgrade path: a database already at 0002 (with rows in
+// various lifecycle states) keeps them as-is, and the vocabulary widens to
+// accept `deleting` while still rejecting everything else.
+func TestMigrateUpgradeFrom0002AcceptsDeleting(t *testing.T) {
+	ctx := context.Background()
+	pool := startPostgres(t, ctx)
+
+	// Apply 0001+0002 by hand and register them, exactly as a pre-delete
+	// deployment would look.
+	if _, err := pool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			version    TEXT PRIMARY KEY,
+			applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		)`); err != nil {
+		t.Fatalf("schema_migrations: %v", err)
+	}
+	for _, name := range []string{"0001_init.sql", "0002_park_status.sql"} {
+		sqlBytes, err := os.ReadFile("migrations/" + name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		if _, err := pool.Exec(ctx, string(sqlBytes)); err != nil {
+			t.Fatalf("apply %s: %v", name, err)
+		}
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO schema_migrations (version) VALUES ($1)`, name); err != nil {
+			t.Fatalf("register %s: %v", name, err)
+		}
+	}
+	_, err := pool.Exec(ctx, `
+		INSERT INTO pages (slug, identifier, code, status) VALUES
+			('old-1', 'old', 1, 'live'),
+			('old-2', 'old', 2, 'parked')`)
+	if err != nil {
+		t.Fatalf("insert pre-delete pages: %v", err)
+	}
+
+	// Migrate must apply only 0003 and preserve existing statuses.
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatalf("Migrate upgrade: %v", err)
+	}
+	var live, parked string
+	if err := pool.QueryRow(ctx,
+		`SELECT status FROM pages WHERE slug = 'old-1'`).Scan(&live); err != nil {
+		t.Fatalf("select live: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`SELECT status FROM pages WHERE slug = 'old-2'`).Scan(&parked); err != nil {
+		t.Fatalf("select parked: %v", err)
+	}
+	if live != "live" || parked != "parked" {
+		t.Fatalf("upgraded statuses = %q/%q, want live/parked", live, parked)
+	}
+
+	// `deleting` is now legal; the CHECK still rejects the unknown.
+	for _, ok := range []string{"live", "parking", "parked", "unparking", "deleting"} {
+		if _, err := pool.Exec(ctx,
+			`UPDATE pages SET status = $1 WHERE slug = 'old-2'`, ok); err != nil {
+			t.Fatalf("status %q rejected: %v", ok, err)
+		}
+	}
+	if _, err := pool.Exec(ctx,
+		`UPDATE pages SET status = 'vanished' WHERE slug = 'old-2'`); err == nil {
+		t.Fatal("bogus page status accepted, want CHECK violation")
+	}
+}

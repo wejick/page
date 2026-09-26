@@ -104,3 +104,72 @@ func GetPage(ctx context.Context, pool *pgxpool.Pool, slug string) (*PageMeta, [
 
 // ErrNotFound marks a missing page.
 var ErrNotFound = errors.New("db: page not found")
+
+// List window clamps (add-admin-management-ui D4): hardcoded because no
+// scenario needs operator tuning — a config knob would be speculative.
+const (
+	listDefaultLimit = 50
+	listMaxLimit     = 500
+)
+
+// ListPages returns page metadata ordered newest first, optionally filtered
+// by lifecycle status ("" = all), plus the total number of pages matching the
+// filter so a paginated UI can render controls. limit <= 0 takes the default
+// (50); values above the cap (500) are clamped; negative offsets become 0.
+func ListPages(ctx context.Context, pool *pgxpool.Pool, status string, limit, offset int) ([]*PageMeta, int, error) {
+	if limit <= 0 {
+		limit = listDefaultLimit
+	}
+	if limit > listMaxLimit {
+		limit = listMaxLimit
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	var st any // nil = no filter; one query shape serves both statements
+	if status != "" {
+		st = status
+	}
+
+	var total int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM pages WHERE ($1::text IS NULL OR status = $1)`, st,
+	).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("db: count pages: %w", err)
+	}
+
+	rows, err := pool.Query(ctx, `
+		SELECT slug, identifier, code, asset_count, total_bytes, created_at, status
+		FROM pages WHERE ($1::text IS NULL OR status = $1)
+		ORDER BY created_at DESC, slug DESC
+		LIMIT $2 OFFSET $3`, st, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("db: list pages: %w", err)
+	}
+	defer rows.Close()
+
+	pages := []*PageMeta{}
+	for rows.Next() {
+		var m PageMeta
+		if err := rows.Scan(&m.Slug, &m.Identifier, &m.Code, &m.AssetCount,
+			&m.TotalBytes, &m.CreatedAt, &m.Status); err != nil {
+			return nil, 0, fmt.Errorf("db: scan page: %w", err)
+		}
+		pages = append(pages, &m)
+	}
+	return pages, total, rows.Err()
+}
+
+// DeletePage removes the page row; its assets cascade. Returns ErrNotFound
+// when no row matches (the delete API maps its guarded transition to 404
+// earlier, so this is a backstop against a concurrent race).
+func DeletePage(ctx context.Context, pool *pgxpool.Pool, slug string) error {
+	tag, err := pool.Exec(ctx, `DELETE FROM pages WHERE slug = $1`, slug)
+	if err != nil {
+		return fmt.Errorf("db: delete page: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}

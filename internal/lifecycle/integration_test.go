@@ -278,6 +278,7 @@ func TestAPIOutcomes(t *testing.T) {
 		mux := http.NewServeMux()
 		mux.Handle("POST /api/pages/{slug}/park", h.api.Park())
 		mux.Handle("POST /api/pages/{slug}/unpark", h.api.Unpark())
+		mux.Handle("DELETE /api/pages/{slug}", h.api.Delete())
 		return mux
 	}())
 	t.Cleanup(ts.Close)
@@ -291,6 +292,18 @@ func TestAPIOutcomes(t *testing.T) {
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatalf("POST %s: %v", path, err)
+		}
+		return resp
+	}
+	del := func(path, token string) *http.Response {
+		t.Helper()
+		req, _ := http.NewRequest("DELETE", ts.URL+path, nil)
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("DELETE %s: %v", path, err)
 		}
 		return resp
 	}
@@ -325,5 +338,177 @@ func TestAPIOutcomes(t *testing.T) {
 	resp.Body.Close()
 	h.mustStatus(t, ctx, "api-1", StatusLive)
 
+	// Delete during a lifecycle transition: 409, page untouched.
+	if _, err := h.pool.Exec(ctx,
+		`UPDATE pages SET status = 'parking' WHERE slug = 'api-1'`); err != nil {
+		t.Fatalf("force parking: %v", err)
+	}
+	resp = del("/api/pages/api-1", "secret")
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("delete during transition status = %d, want 409", resp.StatusCode)
+	}
+	resp.Body.Close()
+	h.mustStatus(t, ctx, "api-1", StatusParking)
+	h.mustExist(t, ctx, "api-1/index.html", true)
+
+	// Settle the page, then delete via API: 200, objects and row gone.
+	if _, err := h.svc.Park(ctx, "api-1"); err != nil {
+		t.Fatalf("park: %v", err)
+	}
+	resp = del("/api/pages/api-1", "secret")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("delete status = %d, want 200", resp.StatusCode)
+	}
+	resp.Body.Close()
+	h.mustExist(t, ctx, "_parked/api-1/index.html", false)
+	var rows int
+	if err := h.pool.QueryRow(ctx,
+		`SELECT count(*) FROM pages WHERE slug = 'api-1'`).Scan(&rows); err != nil || rows != 0 {
+		t.Fatalf("rows after delete = %d/%v, want 0", rows, err)
+	}
+
+	// Deleting it again: 404.
+	resp = del("/api/pages/api-1", "secret")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("re-delete status = %d, want 404", resp.StatusCode)
+	}
+	resp.Body.Close()
+
 	// 401 is covered by the unit test (auth rejects before any I/O).
+}
+
+func TestDeleteLivePage(t *testing.T) {
+	ctx := context.Background()
+	h := start(t)
+	h.seedPage(t, ctx, "del-1")
+	if _, err := h.pool.Exec(ctx,
+		`INSERT INTO counters (identifier, next) VALUES ('del-1', 2)`); err != nil {
+		t.Fatalf("seed counter: %v", err)
+	}
+
+	if err := h.svc.Delete(ctx, "del-1"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	h.mustExist(t, ctx, "del-1/index.html", false)
+	h.mustExist(t, ctx, "del-1/assets/hero.png", false)
+	h.mustExist(t, ctx, "_parked/del-1/index.html", false)
+
+	var rows int
+	if err := h.pool.QueryRow(ctx,
+		`SELECT count(*) FROM pages WHERE slug = 'del-1'`).Scan(&rows); err != nil || rows != 0 {
+		t.Fatalf("page rows after delete = %d/%v, want 0", rows, err)
+	}
+	var assets int
+	if err := h.pool.QueryRow(ctx,
+		`SELECT count(*) FROM assets WHERE slug = 'del-1'`).Scan(&assets); err != nil || assets != 0 {
+		t.Fatalf("asset rows after delete = %d/%v, want 0", assets, err)
+	}
+	// Delete is slug-neutral like park: counters are untouched.
+	var next int
+	if err := h.pool.QueryRow(ctx,
+		`SELECT next FROM counters WHERE identifier = 'del-1'`).Scan(&next); err != nil || next != 2 {
+		t.Fatalf("counter after delete = %d/%v, want 2", next, err)
+	}
+
+	// Delete again: the row is gone, so ErrNotFound (no idempotent re-delete
+	// of a slug that no longer exists).
+	if err := h.svc.Delete(ctx, "del-1"); err != ErrNotFound {
+		t.Fatalf("re-Delete = %v, want ErrNotFound", err)
+	}
+}
+
+func TestDeleteParkedPage(t *testing.T) {
+	ctx := context.Background()
+	h := start(t)
+	h.seedPage(t, ctx, "delp-1")
+	if _, err := h.svc.Park(ctx, "delp-1"); err != nil {
+		t.Fatalf("park: %v", err)
+	}
+
+	if err := h.svc.Delete(ctx, "delp-1"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	h.mustExist(t, ctx, "_parked/delp-1/index.html", false)
+	h.mustExist(t, ctx, "_parked/delp-1/assets/hero.png", false)
+	h.mustExist(t, ctx, "delp-1/index.html", false)
+	h.mustExist(t, ctx, "delp-1/assets/hero.png", false)
+
+	var rows int
+	if err := h.pool.QueryRow(ctx,
+		`SELECT count(*) FROM pages WHERE slug = 'delp-1'`).Scan(&rows); err != nil || rows != 0 {
+		t.Fatalf("page rows after delete = %d/%v, want 0", rows, err)
+	}
+}
+
+func TestDeleteUnknownSlugAndBusy(t *testing.T) {
+	ctx := context.Background()
+	h := start(t)
+
+	if err := h.svc.Delete(ctx, "ghost-9"); err != ErrNotFound {
+		t.Fatalf("Delete unknown = %v, want ErrNotFound", err)
+	}
+
+	// Simulate an in-flight park: delete must refuse and leave everything.
+	h.seedPage(t, ctx, "busy-2")
+	if _, err := h.pool.Exec(ctx,
+		`UPDATE pages SET status = 'parking' WHERE slug = 'busy-2'`); err != nil {
+		t.Fatalf("force status: %v", err)
+	}
+	if err := h.svc.Delete(ctx, "busy-2"); err != ErrBusy {
+		t.Fatalf("Delete during park = %v, want ErrBusy", err)
+	}
+	h.mustStatus(t, ctx, "busy-2", StatusParking)
+	h.mustExist(t, ctx, "busy-2/index.html", true)
+}
+
+func TestDeleteResumesMidFlight(t *testing.T) {
+	ctx := context.Background()
+	h := start(t)
+	h.seedPage(t, ctx, "crash-del-1")
+
+	// Simulate a crash mid-delete: intent recorded, objects still in place.
+	if _, err := h.pool.Exec(ctx,
+		`UPDATE pages SET status = 'deleting' WHERE slug = 'crash-del-1'`); err != nil {
+		t.Fatalf("force status: %v", err)
+	}
+
+	// Re-invoking the same Delete resumes and converges.
+	if err := h.svc.Delete(ctx, "crash-del-1"); err != nil {
+		t.Fatalf("resume Delete: %v", err)
+	}
+	h.mustExist(t, ctx, "crash-del-1/index.html", false)
+	var rows int
+	if err := h.pool.QueryRow(ctx,
+		`SELECT count(*) FROM pages WHERE slug = 'crash-del-1'`).Scan(&rows); err != nil || rows != 0 {
+		t.Fatalf("page rows after resume = %d/%v, want 0", rows, err)
+	}
+}
+
+func TestSweepResumesInterruptedDelete(t *testing.T) {
+	ctx := context.Background()
+	h := start(t)
+	h.seedPage(t, ctx, "sw-del-1")
+
+	// Crash mid-delete: status recorded, objects not yet touched.
+	if _, err := h.pool.Exec(ctx,
+		`UPDATE pages SET status = 'deleting' WHERE slug = 'sw-del-1'`); err != nil {
+		t.Fatalf("force deleting: %v", err)
+	}
+
+	if err := h.svc.Sweep(ctx); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	h.mustExist(t, ctx, "sw-del-1/index.html", false)
+	h.mustExist(t, ctx, "_parked/sw-del-1/index.html", false)
+	var rows int
+	if err := h.pool.QueryRow(ctx,
+		`SELECT count(*) FROM pages WHERE slug = 'sw-del-1'`).Scan(&rows); err != nil || rows != 0 {
+		t.Fatalf("page rows after sweep = %d/%v, want 0", rows, err)
+	}
+
+	// The page no longer appears in the list (same filter the API serves).
+	pages, total, err := db.ListPages(ctx, h.pool, "", 50, 0)
+	if err != nil || total != 0 || len(pages) != 0 {
+		t.Fatalf("list after sweep = %d/%d/%v, want 0/0/nil", len(pages), total, err)
+	}
 }

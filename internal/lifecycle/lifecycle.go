@@ -1,9 +1,10 @@
-// Package lifecycle implements the page park/unpark toggle: hiding a page
-// moves its objects from {slug}/ to the reserved _parked/{slug}/ prefix and
-// back, so the serve plane keeps doing URL→key arithmetic and learns the
+// Package lifecycle implements the page park/unpark toggle and hard delete:
+// hiding a page moves its objects from {slug}/ to the reserved
+// _parked/{slug}/ prefix and back, and deleting removes both prefixes and the
+// row — so the serve plane keeps doing URL→key arithmetic and learns the
 // state purely from key existence. The bucket is the toggle state; Postgres
-// records intent (live/parking/parked/unparking) so a crash mid-move is
-// healed by idempotent retry or the boot sweep. The serve plane never
+// records intent (live/parking/parked/unparking/deleting) so a crash mid-move
+// is healed by idempotent retry or the boot sweep. The serve plane never
 // queries any of this.
 package lifecycle
 
@@ -18,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"page/internal/db"
 	"page/internal/storage"
 )
 
@@ -31,6 +33,7 @@ const (
 	StatusParking   = "parking"
 	StatusParked    = "parked"
 	StatusUnparking = "unparking"
+	StatusDeleting  = "deleting"
 )
 
 var (
@@ -162,11 +165,63 @@ func (s *Service) finalize(ctx context.Context, slug, intent, done string) error
 	return nil
 }
 
-// Sweep resumes every toggle left mid-flight by a crash: rows parked in
-// parking/unparking re-run their (idempotent) move and finalize.
+// Delete removes a page permanently. The guarded transition to `deleting`
+// records intent before any object is removed, so a concurrent park/unpark
+// (or a delete racing a toggle) serializes instead of corrupting state; both
+// the live and parked prefixes go idempotently (the page occupies one of
+// them), and the row goes last — a crash leaves an honest `deleting` row for
+// the boot sweep, never a live row with missing objects
+// (add-admin-management-ui D2, D3). Re-invoking a Delete whose predecessor
+// died mid-flight resumes and converges, like the toggles.
+func (s *Service) Delete(ctx context.Context, slug string) error {
+	if !validSlug(slug) {
+		return ErrNotFound
+	}
+	unlock := s.lockFor(slug)
+	unlock.Lock()
+	defer unlock.Unlock()
+
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE pages SET status = $1 WHERE slug = $2 AND status = ANY($3)`,
+		StatusDeleting, slug, []string{StatusLive, StatusParked, StatusDeleting})
+	if err != nil {
+		return fmt.Errorf("lifecycle: transition deleting: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		// Not in a legal start state: find out why.
+		cur, err := s.status(ctx, slug)
+		if err != nil {
+			return err
+		}
+		if cur == StatusParking || cur == StatusUnparking {
+			return ErrBusy
+		}
+		return ErrNotFound
+	}
+	return s.finishDelete(ctx, slug)
+}
+
+// finishDelete removes both prefixes and the row; every step is idempotent,
+// so Delete and the sweep re-run it safely after a crash.
+func (s *Service) finishDelete(ctx context.Context, slug string) error {
+	if err := s.store.DeletePrefix(ctx, slug+"/"); err != nil {
+		return fmt.Errorf("lifecycle: delete %s/: %w", slug, err)
+	}
+	if err := s.store.DeletePrefix(ctx, ParkedPrefix+slug+"/"); err != nil {
+		return fmt.Errorf("lifecycle: delete %s%s/: %w", ParkedPrefix, slug, err)
+	}
+	if err := db.DeletePage(ctx, s.pool, slug); err != nil {
+		return fmt.Errorf("lifecycle: remove row: %w", err)
+	}
+	return nil
+}
+
+// Sweep resumes every toggle or delete left mid-flight by a crash: rows
+// parked in parking/unparking re-run their (idempotent) move and finalize;
+// rows in deleting re-run the (idempotent) prefix and row removal.
 func (s *Service) Sweep(ctx context.Context) error {
 	rows, err := s.pool.Query(ctx,
-		`SELECT slug, status FROM pages WHERE status = ANY('{parking,unparking}')`)
+		`SELECT slug, status FROM pages WHERE status = ANY('{parking,unparking,deleting}')`)
 	if err != nil {
 		return fmt.Errorf("lifecycle: sweep query: %w", err)
 	}
@@ -191,6 +246,16 @@ func (s *Service) Sweep(ctx context.Context) error {
 	for _, p := range todos {
 		unlock := s.lockFor(p.slug)
 		unlock.Lock()
+		if p.status == StatusDeleting {
+			if err := s.finishDelete(ctx, p.slug); err != nil {
+				unlock.Unlock()
+				return err
+			}
+			unlock.Unlock()
+			slog.Info("lifecycle: resumed interrupted delete",
+				"slug", p.slug)
+			continue
+		}
 		if err := s.move(ctx, p.slug, p.status); err != nil {
 			unlock.Unlock()
 			return err
