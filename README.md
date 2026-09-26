@@ -73,5 +73,5 @@ but never reuses its code — slug counters only move forward.
 Storage works with any S3-compatible endpoint (AWS S3, R2, B2, Spaces,
 MinIO, …), configured entirely via env.
 
-The full variable list (upload caps, ingest limits, keep-external CDNs) and
-the production deployment guide are in [AGENTS.md](AGENTS.md).
+The full variable list and validation rules are in `internal/config`; the
+production deployment guide is in [AGENTS.md](AGENTS.md).

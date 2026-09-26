@@ -1,42 +1,73 @@
 # AGENTS.md
 
 Internal and development documentation for the Page repo — for coding agents
-and developers. Product overview and quick start: [README.md](README.md).
+and developers. Product overview, quick start, and base configuration:
+[README.md](README.md).
 
 Module `page`. Go, stdlib-first: `net/http` ServeMux with 1.22 pattern
 routing (no router/web framework), pgx/v5 for Postgres (write-side only, no
 ORM), minio-go behind the storage seam, testcontainers-go for integration
 tests.
 
-## Repo layout
+## Design invariants
 
-```
-cmd/server      one binary, mode-gated boot: runServe (DB-free) vs runAdminAll
-cmd/seed        uploads a sample Framer-style pack (also re-runs migrations)
-internal/config env parsing + per-mode validation (SERVER_MODE: serve/admin/all)
-internal/db     migrations (embedded SQL, advisory-locked) + write-side queries
-internal/ingest scan → classify → fetch → bake → rewrite (the pipeline)
-internal/upload POST/GET /api/pages handlers, bearer auth, manifest
-internal/lifecycle park/unpark + hard delete (_parked/{slug}/ prefix moves,
-                 guarded status transitions, boot sweep) + API
-internal/serve  mode-scoped router, URL→key arithmetic, HTML cache, StorageProbe
-internal/slug   slug assignment
-internal/storage the ONE seam: Put/Get/Stat/Copy/DeletePrefix
-  mem/          in-memory driver (unit tests)
-  s3compat/     S3-compatible driver (dev + prod)
-  storagetest/  conformance suite shared by drivers
-internal/e2e    end-to-end tests (//go:build integration, testcontainers)
-```
+The patterns and rationale behind the structure; the code may move, these
+don't:
 
-The serve path never touches the database: URL → storage key arithmetic,
-content types from object metadata, entry HTML cached in memory and
-revalidated via `Stat` after the TTL. Postgres is write-side bookkeeping
-only (slug counters, manifest, lifecycle status).
+- **The serve path never touches the database.** Serving is URL → storage
+  key arithmetic, content types from object metadata, entry HTML cached in
+  memory and revalidated via `Stat` after the TTL. Postgres is write-side
+  bookkeeping only (slug counters, manifest, lifecycle status) — a Postgres
+  outage can't affect page serving, and serving health never depends on it.
+- **`internal/storage` is the only code seam.** Five operations (`Put`,
+  `Get`, `Stat`, `Copy`, `DeletePrefix`), deliberately frozen: no listing,
+  no multipart, no presigned URLs. Drivers (`mem`, `s3compat`) are
+  interchangeable and conformance-tested; production vendor deliberately
+  undecided — migrating providers is `rclone copy old new` plus an env
+  change, since objects are immutable and flat under `{slug}/`.
+- **Ingest is the only smart part.** All intelligence runs once, at upload
+  (scan → classify → fetch → bake → rewrite); serving stays dumb. An asset
+  that can't be fetched keeps its original URL and is recorded
+  `kept-external` in the manifest — an accepted compromise, visible via
+  `GET /api/pages/{slug}`, never an upload error. Manifest statuses:
+  `local`, `baked`, `kept-cdn`, `kept-external`.
+- **Takedown without serve-plane logic.** Parking moves objects under the
+  reserved `_parked/{slug}/` prefix; serving learns through key existence,
+  and the HTML cache revalidates via `Stat` after the TTL. Delete is the
+  terminal op: guarded transition to `deleting` before any object is
+  removed, both prefixes deleted idempotently, the row last. A crash
+  mid-operation is healed by the lifecycle `Sweep` on admin/all boot.
+  Deleted slugs' codes are never reused (counters only move forward).
+- **One binary, mode-gated.** `SERVER_MODE=serve` boots from validated
+  storage config only — no pool, no migrations, no bucket create, no sweep;
+  `admin`/`all` own the boot duties. `db.Migrate` takes a Postgres advisory
+  lock so concurrent admin replicas migrate safely.
+
+## Deployment
+
+One DNS name with a TLS cert, fronted by a CDN whose path routing is the
+URL contract in both single-instance and split setups: `/p/*` and `/a/*`
+are served by the **bucket directly** (the edge rewrites `/p/{slug}/…` to
+bucket key `{slug}/…`, sets `X-Content-Type-Options: nosniff`, gives entry
+HTML a short TTL with ETag revalidation, and assets the immutable headers
+the app set); `/` and `/api/*` go to the Go service.
+
+Non-negotiable at the edge:
+
+- Missing keys map to **404** — S3's REST endpoint returns 403 on some code
+  paths; translate both.
+- After parking or deleting a page, purge `/p/{slug}/*` and `/a/{slug}/*`
+  for edge-level removal.
+- The serve instance gets **read-only storage credentials** and sits on the
+  public tier; the admin instance (upload, ingest, lifecycle ops) sits on
+  the internal network/VPN.
+
+The two-instance split is opt-in and purely orchestration — the same image
+runs twice, gated by `SERVER_MODE`. Adopt by deploying `all` everywhere
+first, then flipping the edge's `/p/*`, `/a/*` origins to the serve
+instance; rollback is a mode flip back to `all`.
 
 ## Build and test
-
-Dev infra and run commands: `make up / down / run / seed / test /
-test-integration / tidy` (see the Makefile; quick start in README).
 
 Before declaring done: `gofmt -l .` empty, `go vet ./...` and
 `go vet -tags=integration ./...` clean, `go test ./...` green, and — when
@@ -50,100 +81,10 @@ table-driven and live next to the code (e2e tests in `internal/e2e`).
 
 ## Configuration
 
-Base variables and defaults: [README.md](README.md). The rest:
-
-| Variable | Default | Notes |
-|---|---|---|
-| `HTML_CACHE_TTL` | 60s | entry-HTML cache revalidation window; parked pages stop serving within it |
-| `UPLOAD_MAX_RAW_BYTES` | 25 MiB | upload caps below keep ingest synchronous |
-| `UPLOAD_MAX_DECOMPRESSED_BYTES` | 100 MiB | zip-bomb guard |
-| `UPLOAD_MAX_FILES` | 2000 | |
-| `ASSET_MAX_BYTES` | 10 MiB | per asset (zip entries and fetches) |
-| `FETCH_TIMEOUT` / `FETCH_BUDGET` | 10s / 60s | per fetch / per upload |
-| `FETCH_CONCURRENCY` | 8 | |
-| `KEEP_EXTERNAL_FONTS` | fonts.googleapis.com, fonts.gstatic.com, use.typekit.net | comma host lists, per category |
-| `KEEP_EXTERNAL_JS` | cdn.jsdelivr.net, unpkg.com, cdnjs.cloudflare.com, esm.sh | |
-| `KEEP_EXTERNAL_ICONS` | use.fontawesome.com | |
-| `KEEP_EXTERNAL_MISC` | www.googletagmanager.com, plausible.io | |
-
-Storage works with any S3-compatible endpoint (AWS S3, R2, B2, Spaces,
-MinIO, …), configured entirely via env. Migrating providers is
-`rclone copy old new` plus an env change — objects are immutable and flat
-under `{slug}/`.
-
-## Deployment
-
-**Requirements:** one DNS name (e.g. `page.mycompany.com`) with a TLS cert,
-fronted by a CDN distribution with path-based origins:
-
-| Path | Origin | Notes |
-|---|---|---|
-| `/p/*`, `/a/*` | **bucket** (direct) | edge rewrites `/p/{slug}/…` and `/a/{slug}/…` to bucket key `{slug}/…`; sets `X-Content-Type-Options: nosniff`; entry HTML short TTL + ETag revalidation, assets cache with the immutable headers the app set |
-| `/`, `/api/*` | Go service | upload, ingest, API, lifecycle ops, UI |
-
-Missing keys must map to **404** at the edge: S3's REST endpoint returns
-**403** for missing keys on some code paths — translate both to 404.
-After parking or deleting a page, purge `/p/{slug}/*` and `/a/{slug}/*` for
-edge-level removal.
-
-**One binary, two modes:** `SERVER_MODE` picks which planes an instance
-mounts: `serve` (pages/assets only), `admin` (upload UI + API only), or
-`all` (default — everything). The two-instance split is opt-in and purely
-orchestration: the same image runs twice, with the edge sending `/p/*` and
-`/a/*` to the serve instance while `/` and `/api/*` go to the admin one —
-the path table above is the URL contract either way.
-
-- **Serve instance (public tier):** storage settings only — no
-  `DATABASE_URL`, no `AUTH_TOKEN`, no Postgres connection ever opened, no
-  upload path. Mounts `/p/*`, `/a/*`, `/healthz` only; `/` and `/api/*` are
-  404. Its `healthz` is a storage `Stat` (any response, even not-found,
-  counts as healthy), so a Postgres outage can't fail serving health. Give
-  it **read-only storage credentials** — serving never writes.
-- **Admin instance (private tier):** storage settings plus `DATABASE_URL`,
-  `AUTH_TOKEN`, and the upload/ingest variables. Mounts `/` and `/api/*`
-  only (`/p/*`, `/a/*` are 404); `healthz` pings Postgres. Boot duties live
-  here — migrations, bucket creation, the lifecycle sweep. Restrict it to
-  the internal network/VPN.
-
-**Adopting the split:** deploy `SERVER_MODE=all` everywhere first, then add
-the serve instance and flip the edge's `/p/*`, `/a/*` origins to it.
-Rollback is a mode flip back to `all` — no schema or storage-format changes
-involved.
-
-## How it works
-
-```
-upload ──▶ ingest (scan · classify · bake · rewrite) ──▶ bucket {slug}/…
-serve  ──▶ URL→key arithmetic (no DB) ──▶ cached bytes
-```
-
-- **Ingest is the only smart part** (design: all intelligence once, at
-  upload): safe unzip → entry detection (root `index.html`, else shallowest
-  `.html`, stored as `{slug}/index.html`) → reference scanning (HTML attrs,
-  srcset, style blocks/attrs, SVG, CSS `url()`/`@import`/`@font-face`,
-  recursive) → classification (signed URLs and unknown hosts bake;
-  allowlisted CDNs stay external; everything else bakes) → bounded
-  concurrent fetches → refs rewritten to origin-absolute `/a/{slug}/…`.
-- **Failures degrade gracefully:** an asset that can't be fetched keeps its
-  original URL and is recorded `kept-external` in the manifest — an accepted
-  compromise, visible via `GET /api/pages/{slug}`, never an upload error.
-  Manifest statuses: `local`, `baked`, `kept-cdn`, `kept-external`.
-- **Takedown without serve-plane logic:** parking moves objects under the
-  reserved `_parked/{slug}/` prefix; serving learns about it through key
-  existence, and the entry-HTML cache revalidates via `Stat` after the TTL.
-  Delete is the terminal lifecycle op: guarded transition to `deleting`
-  before any object is removed, both prefixes deleted idempotently, the row
-  last — a crash mid-delete is healed by the same lifecycle `Sweep` on
-  admin/all boot. Deleted slugs' codes are never reused (counters only move
-  forward). When a CDN fronts the bucket, purge `/p/{slug}/*` and
-  `/a/{slug}/*` after parking or deleting for edge-level removal.
-- **One binary, mode-gated:** `SERVER_MODE=serve` boots from validated
-  storage config only — no pool, no migrations, no bucket create, no sweep.
-  `db.Migrate` takes a Postgres advisory lock so concurrent admin replicas
-  migrate safely.
-- **Vendor neutrality:** the storage surface is five operations (`Put`,
-  `Get`, `Stat`, `Copy`, `DeletePrefix`); drivers are interchangeable and
-  conformance-tested. Production vendor deliberately undecided.
+Every variable, default, and validation rule lives in `internal/config`
+(base table in [README.md](README.md)). The one non-obvious knob:
+`HTML_CACHE_TTL` is also the window within which a parked page stops
+serving.
 
 ## Engineering principles (enforced)
 
