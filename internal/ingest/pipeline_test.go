@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"page/internal/fetch"
 	"strings"
 	"testing"
 	"time"
@@ -46,9 +47,9 @@ func TestPipelineRewrite(t *testing.T) {
 			Fonts: []string{"fonts.googleapis.com"},
 			JS:    []string{"cdn.jsdelivr.net"},
 		},
-		Fetch: NewFetcher(1<<20, 500*time.Millisecond, 3*time.Second, 4),
+		Fetch: NewFetcher(1<<20, 500*time.Millisecond, 3*time.Second, 4, fetch.Permissive),
 	}
-	res, err := pipeline.Process(context.Background(), pack, "index.html", goldenSlug)
+	res, err := pipeline.Process(context.Background(), pack, "index.html", goldenSlug, nil)
 	if err != nil {
 		t.Fatalf("Process: %v", err)
 	}

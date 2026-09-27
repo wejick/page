@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"page/internal/fetch"
 	"strings"
 	"testing"
 	"time"
@@ -31,7 +32,7 @@ func TestFetcherCapsAndFailures(t *testing.T) {
 	}))
 	defer ok.Close()
 
-	f := NewFetcher(16, 100*time.Millisecond, 5*time.Second, 4)
+	f := NewFetcher(16, 100*time.Millisecond, 5*time.Second, 4, fetch.Permissive)
 	results := f.FetchAll(context.Background(), []string{
 		ok.URL, slow.URL, oversize.URL, denied.URL, "http://127.0.0.1:1/unreachable",
 	})
@@ -64,7 +65,7 @@ func TestFetcherBudgetShared(t *testing.T) {
 	defer hang.Close()
 
 	// Budget of 400ms across two rounds: the second round must fail fast.
-	f := NewFetcher(16, 5*time.Second, 400*time.Millisecond, 1)
+	f := NewFetcher(16, 5*time.Second, 400*time.Millisecond, 1, fetch.Permissive)
 	ctx := context.Background()
 	r1 := f.FetchAll(ctx, []string{hang.URL})[hang.URL]
 	_ = r1

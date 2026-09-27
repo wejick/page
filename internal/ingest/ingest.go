@@ -35,13 +35,15 @@ type File struct {
 	ContentType string
 }
 
-// ManifestRow records one processed asset.
+// ManifestRow records one processed asset. Reason is set on kept-external
+// rows: why the fetch failed (import-by-url D5).
 type ManifestRow struct {
 	Path        string
 	SourceURL   string
 	ContentType string
 	Bytes       int64
 	Status      string
+	Reason      string
 }
 
 // Result is the outcome of processing a pack.

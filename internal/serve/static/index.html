@@ -84,6 +84,9 @@
   label { display: block; margin: 1rem 0 .3rem; font-weight: 600; }
   input[type=text], select { padding: .4rem; }
   #identifier { width: 100%; box-sizing: border-box; margin-bottom: .5rem; }
+  #srcurl { width: 100%; box-sizing: border-box; margin-bottom: .5rem; }
+  .unresolved { margin: .6rem 0 0; padding-left: 1.25rem;
+                word-break: break-all; text-align: left; }
   .dropzone { display: block; margin: .25rem 0 0; padding: 1.5rem 1rem;
               border: 2px dashed var(--border-strong); border-radius: 8px;
               text-align: center; color: var(--muted); font-weight: normal;
@@ -401,10 +404,12 @@ async function renderDetail(slug) {
 function renderUpload() {
   view.innerHTML = `
     <h2>Publish a static page</h2>
-    <p class="muted">Upload a single HTML file or a zip pack (Figma/Framer export, browser save-as).
+    <p class="muted">Upload a single HTML file or a zip pack (Figma/Framer export, browser save-as), or import a page by URL — the server fetches it and bakes its assets.
 A new immutable page is created every time.</p>
     <label for="identifier">Identifier (optional)</label>
     <input type="text" id="identifier" placeholder="landing-page → landing-page-1">
+    <label for="srcurl">Import by URL</label>
+    <input type="text" id="srcurl" placeholder="https://example.com/post" autocomplete="off">
     <label for="file">HTML file or zip pack</label>
     <label class="dropzone" id="dropzone" for="file">
       <strong>Drop an HTML file or zip pack here</strong><br>
@@ -412,7 +417,7 @@ A new immutable page is created every time.</p>
       <input type="file" id="file" class="visually-hidden" accept=".html,.htm,.zip">
       <span class="chosen" id="chosen"></span>
     </label>
-    <button id="go" class="btn">Upload</button>
+    <button id="go" class="btn">Publish</button>
     <div id="result"></div>`;
 
   const result = $("result");
@@ -447,17 +452,24 @@ A new immutable page is created every time.</p>
 
   $("go").onclick = async () => {
     const file = $("file").files[0];
+    const srcurl = $("srcurl").value.trim();
     result.className = ""; result.style.display = "block";
-    if (!file) { result.classList.add("err"); result.textContent = "Choose a file first."; return; }
+    if (srcurl && file) { result.classList.add("err"); result.textContent = "Provide a URL or a file, not both."; return; }
+    if (!srcurl && !file) { result.classList.add("err"); result.textContent = "Choose a file or enter a URL first."; return; }
     const fd = new FormData();
-    fd.append("file", file);
+    if (srcurl) fd.append("url", srcurl);
+    else fd.append("file", file);
     const ident = $("identifier").value.trim();
     if (ident) fd.append("identifier", ident);
     const go = $("go");
-    go.disabled = true; go.textContent = "Uploading…";
+    go.disabled = true; go.textContent = srcurl ? "Importing…" : "Uploading…";
     try {
       const res = await api("/api/pages", { method: "POST", body: fd });
-      const body = await res.json().catch(() => ({}));
+      // Errors may be JSON (validation, strict gate) or plain text (fetch
+      // failures via http.Error); parse what we can either way.
+      const raw = await res.text();
+      let body = {};
+      try { body = JSON.parse(raw); } catch { body = { message: raw.trim() }; }
       if (res.status === 201) {
         // The 201 response carries the ingest counts (upload.go); surface
         // them here so kept-external doesn't hide until someone opens the
@@ -473,9 +485,18 @@ A new immutable page is created every time.</p>
           ? `<div class="sum${a.kept_external ? " warn" : ""}">Assets: ${parts.join(", ")}</div>`
           : "";
         result.innerHTML = `Published: <a href='${esc(body.url)}' target="_blank">${esc(body.slug)}</a> — <a href="#/p/${esc(encodeURIComponent(body.slug))}">details</a>${sum}`;
+      } else if (body.error === "import_incomplete") {
+        // The strict gate: show which assets failed and the way out
+        // (import-by-url D5).
+        result.classList.add("err");
+        const items = (body.unresolved || []).map((u) =>
+          `<li><code>${esc(u.url)}</code> — ${esc(u.reason || "unfetchable")}</li>`).join("");
+        result.innerHTML = `${esc(body.message || "Import incomplete.")}` +
+          (items ? `<ul class="unresolved">${items}</ul>` : "");
       } else {
         result.classList.add("err");
-        result.textContent = "Error " + res.status + ": " + (body.error || res.statusText || "upload failed");
+        result.textContent = "Error " + res.status + ": " +
+          (body.message || body.error || res.statusText || "upload failed");
       }
     } catch (e) {
       if (e.message === "unauthorized") {
@@ -486,7 +507,7 @@ A new immutable page is created every time.</p>
         result.textContent = "Upload failed: " + e;
       }
     } finally {
-      go.disabled = false; go.textContent = "Upload";
+      go.disabled = false; go.textContent = "Publish";
     }
   };
 }

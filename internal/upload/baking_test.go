@@ -8,13 +8,15 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"page/internal/fetch"
 )
 
 // 6.5 acceptance: the wired pipeline bakes/keeps/records correctly and
 // fetch failures never fail the upload.
 func TestUploadBakingWiring(t *testing.T) {
 	ctx := context.Background()
-	h, store, _ := newTestHandler(t, ctx, 0)
+	h, store, _ := newTestHandler(t, ctx, 0, fetch.Permissive)
 
 	html := `<!doctype html><html><head>` +
 		`<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter">` +

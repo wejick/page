@@ -17,11 +17,12 @@ import (
 
 	"page/internal/config"
 	"page/internal/db"
+	"page/internal/fetch"
 	"page/internal/ingest"
 	"page/internal/storage/mem"
 )
 
-func newTestHandler(t *testing.T, ctx context.Context, rawCap int64) (*Handler, *mem.Store, *pgxpool.Pool) {
+func newTestHandler(t *testing.T, ctx context.Context, rawCap int64, guard fetch.GuardFunc) (*Handler, *mem.Store, *pgxpool.Pool) {
 	t.Helper()
 	pgc, err := postgres.Run(ctx, "postgres:17-alpine",
 		postgres.WithDatabase("page"), postgres.WithUsername("page"),
@@ -59,6 +60,7 @@ func newTestHandler(t *testing.T, ctx context.Context, rawCap int64) (*Handler, 
 			JS:    []string{"cdn.jsdelivr.net"},
 		},
 		Token: "secret",
+		Guard: guard,
 	})
 	return h, store, pool
 }
@@ -136,7 +138,7 @@ func mustTestZip(t *testing.T, files map[string]string) []byte {
 
 func TestUploadAuth(t *testing.T) {
 	ctx := context.Background()
-	h, store, _ := newTestHandler(t, ctx, 0)
+	h, store, _ := newTestHandler(t, ctx, 0, fetch.Permissive)
 	body, ctype := multipartBody(t, "p.html", []byte("<h1>x</h1>"), nil)
 
 	if rec := post(h, body, ctype, ""); rec.Code != http.StatusUnauthorized {
@@ -158,7 +160,7 @@ func TestUploadAuth(t *testing.T) {
 
 func TestSingleHTMLHappyPath(t *testing.T) {
 	ctx := context.Background()
-	h, _, _ := newTestHandler(t, ctx, 0)
+	h, _, _ := newTestHandler(t, ctx, 0, fetch.Permissive)
 	body, ctype := multipartBody(t, "page.html", []byte("<h1>landing</h1>"),
 		map[string]string{"identifier": "landing-page"})
 
@@ -187,7 +189,7 @@ func TestSingleHTMLHappyPath(t *testing.T) {
 
 func TestIdentifierOmitted(t *testing.T) {
 	ctx := context.Background()
-	h, _, _ := newTestHandler(t, ctx, 0)
+	h, _, _ := newTestHandler(t, ctx, 0, fetch.Permissive)
 	body, ctype := multipartBody(t, "p.html", []byte("<h1>x</h1>"), nil)
 	if rec := post(h, body, ctype, "secret"); rec.Code != 201 ||
 		!bytes.Contains(rec.Body.Bytes(), []byte(`"slug":"page-1"`)) {
@@ -197,7 +199,7 @@ func TestIdentifierOmitted(t *testing.T) {
 
 func TestZipPackManifest(t *testing.T) {
 	ctx := context.Background()
-	h, store, _ := newTestHandler(t, ctx, 0)
+	h, store, _ := newTestHandler(t, ctx, 0, fetch.Permissive)
 
 	zipBytes := mustTestZip(t, map[string]string{
 		"index.html":      `<html><head><link rel="stylesheet" href="style.css"></head><body><img src="assets/hero.png"></body></html>`,
@@ -229,7 +231,7 @@ func TestZipPackManifest(t *testing.T) {
 
 func TestRejections(t *testing.T) {
 	ctx := context.Background()
-	h, store, _ := newTestHandler(t, ctx, 0)
+	h, store, _ := newTestHandler(t, ctx, 0, fetch.Permissive)
 
 	cases := []struct {
 		name    string
@@ -259,7 +261,7 @@ func TestRejections(t *testing.T) {
 		t.Fatalf("traversal status = %d, want 422", rec.Code)
 	}
 	// Oversize raw → 413.
-	h2, _, _ := newTestHandler(t, ctx, 16)
+	h2, _, _ := newTestHandler(t, ctx, 16, fetch.Permissive)
 	body2, ctype2 := multipartBody(t, "big.html", bytes.Repeat([]byte("x"), 64), nil)
 	if rec := post(h2, body2, ctype2, "secret"); rec.Code != 413 {
 		t.Fatalf("oversize status = %d, want 413", rec.Code)
@@ -272,7 +274,7 @@ func TestRejections(t *testing.T) {
 
 func TestListEndpoint(t *testing.T) {
 	ctx := context.Background()
-	h, _, pool := newTestHandler(t, ctx, 0)
+	h, _, pool := newTestHandler(t, ctx, 0, fetch.Permissive)
 
 	// Unauthenticated list: 401 before any I/O.
 	if rec := getList(h, "", ""); rec.Code != http.StatusUnauthorized {

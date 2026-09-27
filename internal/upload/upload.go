@@ -1,6 +1,7 @@
-// Package upload implements the authenticated upload API: multipart intake,
-// validation and zip-safety caps, slug assignment, ingest, storage, and
-// page persistence. Handlers are mounted by the serve package.
+// Package upload implements the authenticated upload API: multipart intake
+// (file or source URL), validation and zip-safety caps, slug assignment,
+// ingest, storage, and page persistence. Handlers are mounted by the serve
+// package.
 package upload
 
 import (
@@ -9,9 +10,11 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,6 +23,7 @@ import (
 
 	"page/internal/config"
 	"page/internal/db"
+	"page/internal/fetch"
 	"page/internal/ingest"
 	"page/internal/slug"
 	"page/internal/storage"
@@ -32,6 +36,7 @@ type Handler struct {
 	caps  config.Caps
 	keep  ingest.KeepRules
 	token string
+	guard fetch.GuardFunc
 }
 
 // Options carries handler dependencies.
@@ -41,11 +46,16 @@ type Options struct {
 	Caps  config.Caps
 	Keep  ingest.KeepRules
 	Token string
+	Guard fetch.GuardFunc // SSRF guard for outbound fetches; nil → fetch.Standard
 }
 
 // New builds the API handler.
 func New(o Options) *Handler {
-	return &Handler{pool: o.Pool, store: o.Store, caps: o.Caps, keep: o.Keep, token: o.Token}
+	guard := o.Guard
+	if guard == nil {
+		guard = fetch.Standard
+	}
+	return &Handler{pool: o.Pool, store: o.Store, caps: o.Caps, keep: o.Keep, token: o.Token, guard: guard}
 }
 
 // Create handles POST /api/pages.
@@ -64,52 +74,81 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 
 	// Cap the raw body (multipart framing overhead accounted for).
 	r.Body = http.MaxBytesReader(w, r.Body, h.caps.MaxRawBytes+(1<<20))
-	file, _, err := r.FormFile("file")
-	if err != nil {
-		if strings.Contains(err.Error(), "request body too large") {
+	srcURL := strings.TrimSpace(r.FormValue("url"))
+	file, _, fileErr := r.FormFile("file")
+	hasFile := fileErr == nil
+	switch {
+	case srcURL != "" && hasFile:
+		file.Close()
+		http.Error(w, "provide either 'url' or 'file', not both", http.StatusUnprocessableEntity)
+		return
+	case srcURL == "" && !hasFile:
+		if strings.Contains(fmt.Sprint(fileErr), "request body too large") {
 			http.Error(w, "upload exceeds raw size cap", http.StatusRequestEntityTooLarge)
 			return
 		}
 		http.Error(w, "multipart form: missing 'file' field", http.StatusBadRequest)
 		return
 	}
-	defer file.Close()
-	data, err := io.ReadAll(file)
-	if err != nil {
-		http.Error(w, "upload exceeds raw size cap", http.StatusRequestEntityTooLarge)
-		return
-	}
-	if int64(len(data)) > h.caps.MaxRawBytes {
-		http.Error(w, "upload exceeds raw size cap", http.StatusRequestEntityTooLarge)
-		return
-	}
-	identifier := r.FormValue("identifier")
-	if identifier == "" {
-		identifier = "page" // default identifier (spec: identifier omitted)
-	}
 
-	// Route by content: zip pack or single HTML.
+	ctx := r.Context()
 	lim := ingest.Limits{
 		MaxFiles:        h.caps.MaxFiles,
 		MaxDecompressed: h.caps.MaxDecompressedBytes,
 		MaxAssetBytes:   h.caps.MaxAssetBytes,
 	}
+
 	var files map[string][]byte
-	if bytes.HasPrefix(data, []byte("PK\x03\x04")) {
-		files, err = ingest.OpenPack(data, lim)
+	var baseURL *url.URL
+	if srcURL != "" {
+		// URL import (import-by-url D1/D2): fetch the entry document, then
+		// feed it into the machinery with its final URL as the base.
+		entry, err := fetch.NewEntryFetcher(h.caps.MaxRawBytes, h.caps.FetchTimeout, h.guard).
+			Fetch(ctx, srcURL)
 		if err != nil {
-			if isSizeErr(err) {
-				http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
-				return
-			}
-			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+			status, msg := fetchFailure(err)
+			http.Error(w, msg, status)
 			return
 		}
-	} else if looksLikeHTML(data) {
-		files = map[string][]byte{"index.html": data}
+		files = map[string][]byte{"index.html": entry.Data}
+		baseURL = entry.FinalURL
 	} else {
-		http.Error(w, "upload must be a single HTML file or a zip pack", http.StatusUnsupportedMediaType)
-		return
+		defer file.Close()
+		data, err := io.ReadAll(file)
+		if err != nil {
+			http.Error(w, "upload exceeds raw size cap", http.StatusRequestEntityTooLarge)
+			return
+		}
+		if int64(len(data)) > h.caps.MaxRawBytes {
+			http.Error(w, "upload exceeds raw size cap", http.StatusRequestEntityTooLarge)
+			return
+		}
+		identifier := r.FormValue("identifier")
+		if identifier == "" {
+			identifier = "page" // default identifier (spec: identifier omitted)
+		}
+		// Route by content: zip pack or single HTML.
+		if bytes.HasPrefix(data, []byte("PK\x03\x04")) {
+			files, err = ingest.OpenPack(data, lim)
+			if err != nil {
+				if isSizeErr(err) {
+					http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
+					return
+				}
+				http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+				return
+			}
+		} else if fetch.LooksLikeHTML(data) {
+			files = map[string][]byte{"index.html": data}
+		} else {
+			http.Error(w, "upload must be a single HTML file or a zip pack", http.StatusUnsupportedMediaType)
+			return
+		}
+	}
+
+	identifier := r.FormValue("identifier")
+	if identifier == "" {
+		identifier = "page" // default identifier (spec: identifier omitted)
 	}
 
 	entry, err := ingest.DetectEntry(files)
@@ -121,7 +160,6 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	// Slug assignment + ingest + persistence, with retry on the unique-index
 	// backstop. Ingest is slug-dependent (refs rewrite to /a/{slug}/...), so
 	// it runs inside the retry loop; the fetch budget is per upload (D10).
-	ctx := r.Context()
 	for attempt := 0; attempt < 3; attempt++ {
 		slugStr, code, err := slug.New(ctx, h.pool, identifier)
 		if err != nil {
@@ -134,13 +172,34 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		}
 
 		fetcher := ingest.NewFetcher(h.caps.MaxAssetBytes, h.caps.FetchTimeout,
-			h.caps.FetchBudget, h.caps.FetchConcurrency)
+			h.caps.FetchBudget, h.caps.FetchConcurrency, h.guard)
 		res, err := (&ingest.Pipeline{Keep: h.keep, Fetch: fetcher}).
-			Process(ctx, files, entry, slugStr)
+			Process(ctx, files, entry, slugStr, baseURL)
 		if err != nil {
 			_ = h.store.DeletePrefix(ctx, slugStr+"/")
 			h.fail(w, r, "ingest", err)
 			return
+		}
+
+		// Strict completeness gate (import-by-url D5): an import is
+		// all-or-nothing — any asset we could not fetch would publish a
+		// broken copy. Uploads stay best-effort: their user already has the
+		// bytes in hand.
+		if baseURL != nil {
+			unresolved := unresolvedAssets(res)
+			if len(unresolved) > 0 {
+				_ = h.store.DeletePrefix(ctx, slugStr+"/")
+				slog.Info("upload", "what", "import rejected", "slug", slugStr,
+					"unresolved", len(unresolved), "source", baseURL)
+				writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+					"error": "import_incomplete",
+					"message": fmt.Sprintf(
+						"%d asset%s on the source page could not be fetched. The import was rejected rather than publish a broken copy. Save the page in your browser (Save As or SingleFile) and upload the file instead.",
+						len(unresolved), plural(len(unresolved))),
+					"unresolved": unresolved,
+				})
+				return
+			}
 		}
 
 		if err := h.putObjects(ctx, slugStr, res); err != nil {
@@ -282,26 +341,46 @@ func isSizeErr(err error) bool {
 	return strings.Contains(err.Error(), "exceeds") || strings.Contains(err.Error(), "cap")
 }
 
-// htmlMarkers identify an HTML document even when served as text/plain.
-var htmlMarkers = []string{
-	"<!doctype html", "<html", "<head", "<body", "<div", "<script", "<img ",
+// fetchFailure maps typed entry-fetch failures to a status code and message
+// in one place (import-by-url D6): caller mistakes are 4xx, source-side
+// failures are 502.
+func fetchFailure(err error) (int, string) {
+	switch {
+	case errors.Is(err, fetch.ErrInvalidURL):
+		return http.StatusUnprocessableEntity, "invalid source url"
+	case errors.Is(err, fetch.ErrBlocked):
+		return http.StatusUnprocessableEntity, "source url is not fetchable (blocked address)"
+	case errors.Is(err, fetch.ErrNotHTML):
+		return http.StatusUnsupportedMediaType, "source did not return an HTML document"
+	case errors.Is(err, fetch.ErrTooLarge):
+		return http.StatusRequestEntityTooLarge, "source response exceeds entry size cap"
+	default:
+		return http.StatusBadGateway, "could not fetch source url"
+	}
 }
 
-func looksLikeHTML(data []byte) bool {
-	sample := data
-	if len(sample) > 512 {
-		sample = sample[:512]
-	}
-	if strings.HasPrefix(http.DetectContentType(sample), "text/html") {
-		return true
-	}
-	low := strings.ToLower(string(sample))
-	for _, m := range htmlMarkers {
-		if strings.Contains(low, m) {
-			return true
+// unresolvedAssets lists the manifest's kept-external rows: the import
+// gate's completeness report (import-by-url D5).
+func unresolvedAssets(res *ingest.Result) []map[string]string {
+	var out []map[string]string
+	for _, m := range res.Manifest {
+		if m.Status != ingest.StatusKeptExternal {
+			continue
 		}
+		reason := m.Reason
+		if reason == "" {
+			reason = "unfetchable"
+		}
+		out = append(out, map[string]string{"url": m.SourceURL, "reason": reason})
 	}
-	return false
+	return out
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // slugIdentifier recovers the identifier part; the slug is "{identifier}-{code}"

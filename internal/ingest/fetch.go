@@ -7,10 +7,14 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"page/internal/fetch"
 )
 
 // Fetcher fetches external assets for baking, bounded per design D10:
 // per-request timeout, total budget, concurrency pool, per-asset size cap.
+// Every request dials through the SSRF-guarded transport shared with entry
+// imports (import-by-url D3).
 type Fetcher struct {
 	client    *http.Client
 	budget    time.Duration
@@ -19,17 +23,19 @@ type Fetcher struct {
 	userAgent string
 }
 
-// NewFetcher builds a fetcher from ingest caps.
-func NewFetcher(maxAssetBytes int64, timeout, budget time.Duration, concurrency int) *Fetcher {
+// NewFetcher builds a fetcher from ingest caps. guard is the shared SSRF
+// guard: fetch.Standard in production, fetch.Permissive in tests — httptest
+// serves on loopback, which Standard refuses.
+func NewFetcher(maxAssetBytes int64, timeout, budget time.Duration, concurrency int, guard fetch.GuardFunc) *Fetcher {
 	if concurrency <= 0 {
 		concurrency = 8
 	}
 	return &Fetcher{
-		client:    &http.Client{Timeout: timeout},
+		client:    &http.Client{Timeout: timeout, Transport: fetch.NewTransport(guard)},
 		budget:    budget,
 		sem:       make(chan struct{}, concurrency),
 		maxBytes:  maxAssetBytes,
-		userAgent: "static-page-hosting-baker/1.0",
+		userAgent: fetch.UserAgent,
 	}
 }
 

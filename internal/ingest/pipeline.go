@@ -3,6 +3,7 @@ package ingest
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"path"
@@ -10,6 +11,8 @@ import (
 	"strings"
 
 	"golang.org/x/net/html"
+
+	"page/internal/fetch"
 )
 
 // Pipeline transforms a pack into bucket objects: it scans references,
@@ -50,6 +53,7 @@ type plan struct {
 	data      []byte
 	ct        string
 	status    string
+	reason    string // kept-external: why the fetch failed (import-by-url D5)
 	sourceURL string
 	fetchDone bool
 }
@@ -57,7 +61,8 @@ type plan struct {
 type cssJob struct {
 	storePath string // local css file path ("" for external)
 	data      []byte
-	baseDir   string // pack dir for local, URL dir for external
+	baseDir   string   // pack dir for local CSS
+	baseURL   *url.URL // source URL for external CSS (import-by-url D4)
 }
 
 type htmlTarget struct {
@@ -65,6 +70,7 @@ type htmlTarget struct {
 	attr    string
 	raw     string
 	baseDir string
+	base    *url.URL // document base for imports (import-by-url D4)
 	mode    rewriteMode
 }
 
@@ -73,6 +79,7 @@ type baker struct {
 	files           map[string][]byte
 	keep            KeepRules
 	fetcher         *Fetcher
+	base            *url.URL // document base for imports (import-by-url D4)
 	plans           map[string]*plan
 	toStore         map[string]File
 	cssQueue        []*cssJob
@@ -85,8 +92,9 @@ type baker struct {
 }
 
 // Process runs the full pipeline for a pack and returns the rewritten entry,
-// files to store, and the manifest.
-func (p *Pipeline) Process(ctx context.Context, files map[string][]byte, entryPath, slug string) (*Result, error) {
+// files to store, and the manifest. A non-nil base (URL imports) resolves
+// the document's relative references against it (import-by-url D4).
+func (p *Pipeline) Process(ctx context.Context, files map[string][]byte, entryPath, slug string, base *url.URL) (*Result, error) {
 	entryDir := EntryDir(entryPath)
 
 	b := &baker{
@@ -111,26 +119,32 @@ func (p *Pipeline) Process(ctx context.Context, files map[string][]byte, entryPa
 	if err != nil {
 		return nil, fmt.Errorf("ingest: parse entry: %w", err)
 	}
+	if base != nil {
+		if u := baseHRef(doc, base); u != nil {
+			base = u
+		}
+	}
+	b.base = base
 	var styleTexts []*html.Node
 	walkRefs(doc, func(n *html.Node, attr, raw string, isCSS bool) {
 		switch {
 		case attr == "#text": // <style> element text
 			styleTexts = append(styleTexts, n)
-			b.scanCSS(&cssJob{data: []byte(raw), baseDir: entryDir})
+			b.scanCSS(&cssJob{data: []byte(raw), baseDir: entryDir, baseURL: base})
 		case attr == "style": // inline style attribute
-			b.scanCSS(&cssJob{data: []byte(raw), baseDir: entryDir})
-			b.targets = append(b.targets, htmlTarget{n: n, attr: attr, raw: raw, baseDir: entryDir, mode: modeCSS})
+			b.scanCSS(&cssJob{data: []byte(raw), baseDir: entryDir, baseURL: base})
+			b.targets = append(b.targets, htmlTarget{n: n, attr: attr, raw: raw, baseDir: entryDir, base: base, mode: modeCSS})
 		case attr == "srcset":
 			for _, cand := range srcsetURLs(raw) {
-				b.planFor(cand, entryDir)
+				b.planFor(cand, entryDir, base)
 			}
-			b.targets = append(b.targets, htmlTarget{n: n, attr: attr, raw: raw, baseDir: entryDir, mode: modeSrcset})
+			b.targets = append(b.targets, htmlTarget{n: n, attr: attr, raw: raw, baseDir: entryDir, base: base, mode: modeSrcset})
 		default:
-			pl := b.planFor(raw, entryDir)
+			pl := b.planFor(raw, entryDir, base)
 			if isCSS || isStylesheetNode(n) {
 				b.maybeEnqueueCSS(pl, pl.storePath)
 			}
-			b.targets = append(b.targets, htmlTarget{n: n, attr: attr, raw: raw, baseDir: entryDir, mode: modeSingle})
+			b.targets = append(b.targets, htmlTarget{n: n, attr: attr, raw: raw, baseDir: entryDir, base: base, mode: modeSingle})
 		}
 	})
 
@@ -143,33 +157,33 @@ func (p *Pipeline) Process(ctx context.Context, files map[string][]byte, entryPa
 	for _, t := range b.targets {
 		switch t.mode {
 		case modeSingle:
-			if pl := b.plans[planIdentity(t.raw, t.baseDir, b.files)]; pl != nil &&
+			if pl := b.plans[planIdentity(t.raw, t.baseDir, b.files, t.base)]; pl != nil &&
 				pl.action != planSkip && pl.newValue != "" {
 				setAttrValue(t.n, t.attr, pl.newValue)
 			}
 		case modeSrcset:
 			setAttrValue(t.n, t.attr, rewriteSrcset(t.raw, func(raw string) string {
-				if pl := b.plans[planIdentity(raw, t.baseDir, b.files)]; pl != nil &&
+				if pl := b.plans[planIdentity(raw, t.baseDir, b.files, t.base)]; pl != nil &&
 					pl.action != planSkip && pl.newValue != "" {
 					return pl.newValue
 				}
 				return raw
 			}))
 		case modeCSS:
-			setAttrValue(t.n, t.attr, b.renderCSS(t.raw, t.baseDir))
+			setAttrValue(t.n, t.attr, b.renderCSS(t.raw, t.baseDir, t.base))
 		}
 	}
 	for _, t := range styleTexts {
 		for c := t.FirstChild; c != nil; c = c.NextSibling {
 			if c.Type == html.TextNode {
-				c.Data = b.renderCSS(c.Data, entryDir)
+				c.Data = b.renderCSS(c.Data, entryDir, b.base)
 			}
 		}
 	}
 	// Rewritten local stylesheets replace their original bytes.
 	for _, job := range b.scannedLocalCSS {
 		if f, ok := b.toStore[job.storePath]; ok {
-			f.Data = []byte(b.renderCSS(string(job.data), job.baseDir))
+			f.Data = []byte(b.renderCSS(string(job.data), job.baseDir, job.baseURL))
 			b.toStore[job.storePath] = f
 		}
 	}
@@ -203,6 +217,7 @@ func (p *Pipeline) Process(ctx context.Context, files map[string][]byte, entryPa
 			Path: pl.sourceURL, SourceURL: pl.sourceURL,
 			ContentType: guessTypeFromURL(pl.sourceURL),
 			Status:      pl.status,
+			Reason:      pl.reason,
 		})
 	}
 	sort.Slice(res.Manifest, func(i, j int) bool { return res.Manifest[i].Path < res.Manifest[j].Path })
@@ -238,6 +253,7 @@ func (b *baker) run(ctx context.Context) error {
 				pl.action = planKeep
 				pl.status = StatusKeptExternal
 				pl.newValue = upgradeHTTPS(pl.sourceURL)
+				pl.reason = fetchReason(r.Err)
 				b.kept = append(b.kept, pl)
 				continue
 			}
@@ -248,8 +264,12 @@ func (b *baker) run(ctx context.Context) error {
 			if isCSPath(pl.storePath) || strings.Contains(pl.ct, "text/css") {
 				if !b.cssScanned[pl.identity] {
 					b.cssScanned[pl.identity] = true
+					// Relative refs inside external CSS resolve against the
+					// stylesheet's own URL (import-by-url D4); storePath set
+					// so the rewritten bytes replace the baked file.
 					b.cssQueue = append(b.cssQueue, &cssJob{
-						data: pl.data, baseDir: urlDir(pl.sourceURL),
+						storePath: pl.storePath, data: pl.data,
+						baseURL: parseURL(pl.sourceURL),
 					})
 				}
 			}
@@ -261,7 +281,7 @@ func (b *baker) run(ctx context.Context) error {
 func (b *baker) scanCSS(job *cssJob) {
 	urls, imports := cssRefs(string(job.data))
 	for _, raw := range append(urls, imports...) {
-		pl := b.planFor(raw, job.baseDir)
+		pl := b.planFor(raw, job.baseDir, job.baseURL)
 		if pl.action == planLocal && isCSPath(pl.storePath) && !b.cssScanned[pl.identity] {
 			b.cssScanned[pl.identity] = true
 			b.cssQueue = append(b.cssQueue, &cssJob{
@@ -292,9 +312,9 @@ func isStylesheetNode(n *html.Node) bool {
 }
 
 // renderCSS rewrites CSS text using plans known at call time.
-func (b *baker) renderCSS(css, baseDir string) string {
+func (b *baker) renderCSS(css, baseDir string, base *url.URL) string {
 	return rewriteCSS(css, func(raw string) (string, bool) {
-		pl := b.plans[planIdentity(raw, baseDir, b.files)]
+		pl := b.plans[planIdentity(raw, baseDir, b.files, base)]
 		if pl == nil || pl.action == planSkip || pl.newValue == "" {
 			return "", false
 		}
@@ -302,14 +322,25 @@ func (b *baker) renderCSS(css, baseDir string) string {
 	})
 }
 
-// planIdentity is the dedupe key for a raw reference in a base directory.
-func planIdentity(raw, baseDir string, files map[string][]byte) string {
+// planIdentity is the dedupe key for a raw reference resolved in a context:
+// a URL base (URL imports, import-by-url D4) when one applies, else the
+// pack-local directory. Skip-class refs, absolute refs, and base-resolved
+// refs all key on their canonical absolute URL.
+func planIdentity(raw, baseDir string, files map[string][]byte, base *url.URL) string {
 	raw = strings.TrimSpace(raw)
 	if skipRef(raw) {
 		return "skip:" + raw
 	}
 	if u, ok := absoluteRef(raw); ok {
 		return u.String()
+	}
+	if base != nil {
+		if u, err := base.Parse(raw); err == nil &&
+			(u.Scheme == "http" || u.Scheme == "https") && u.Host != "" {
+			return u.String()
+		}
+		// Unresolvable against the base and there is no pack to fall back on.
+		return "skip:" + raw
 	}
 	var resolved string
 	if strings.HasPrefix(raw, "/") {
@@ -322,9 +353,9 @@ func planIdentity(raw, baseDir string, files map[string][]byte) string {
 }
 
 // planFor resolves one raw reference to its plan, deduped by identity.
-func (b *baker) planFor(raw, baseDir string) *plan {
+func (b *baker) planFor(raw, baseDir string, base *url.URL) *plan {
 	raw = strings.TrimSpace(raw)
-	id := planIdentity(raw, baseDir, b.files)
+	id := planIdentity(raw, baseDir, b.files, base)
 	if pl, ok := b.plans[id]; ok {
 		return pl
 	}
@@ -333,22 +364,30 @@ func (b *baker) planFor(raw, baseDir string) *plan {
 		b.plans[id] = pl
 		return pl
 	}
-	if u, ok := absoluteRef(raw); ok {
-		source := u.String()
-		pl := &plan{identity: source, sourceURL: source}
+	if !strings.HasPrefix(id, "local:") {
+		// URL identity: an absolute raw ref or one resolved against a base.
+		// The identity is a canonical URL string, so it is both the dedupe
+		// key and the fetch URL.
+		u, err := url.Parse(id)
+		if err != nil {
+			pl := &plan{identity: id, action: planSkip}
+			b.plans[id] = pl
+			return pl
+		}
+		pl := &plan{identity: id, sourceURL: id}
 		b.plans[id] = pl
 		if !IsSignedURL(u) && b.keep.ShouldKeep(u) {
 			pl.action = planKeep
 			pl.status = StatusKeptCDN
-			pl.newValue = upgradeHTTPS(source)
+			pl.newValue = upgradeHTTPS(id)
 			b.kept = append(b.kept, pl)
 			return pl
 		}
 		pl.action = planBake
-		pl.fetchURL = source
+		pl.fetchURL = id
 		pl.storePath = externalStorePath(u)
 		pl.newValue = "/a/" + b.slug + "/" + pl.storePath
-		b.bakeOrder = append(b.bakeOrder, source)
+		b.bakeOrder = append(b.bakeOrder, id)
 		return pl
 	}
 	resolved := strings.TrimPrefix(id, "local:")
@@ -366,6 +405,53 @@ func (b *baker) planFor(raw, baseDir string) *plan {
 	}
 	b.plans[id] = pl
 	return pl
+}
+
+// baseHRef returns the document's <base href> resolved against the source
+// base, overriding it when present (import-by-url D4). Anything unusable
+// leaves the source base standing.
+func baseHRef(doc *html.Node, source *url.URL) *url.URL {
+	var found *url.URL
+	var walk func(n *html.Node)
+	walk = func(n *html.Node) {
+		if found != nil {
+			return
+		}
+		if n.Type == html.ElementNode && n.Data == "base" {
+			if href := strings.TrimSpace(attrValue(n, "href")); href != "" {
+				if u, err := source.Parse(href); err == nil &&
+					(u.Scheme == "http" || u.Scheme == "https") && u.Host != "" {
+					found = u
+				}
+			}
+		}
+		for c := n.FirstChild; c != nil && found == nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(doc)
+	return found
+}
+
+// parseURL parses a canonical URL string from an identity; failure yields
+// nil, which degrades CSS resolution to skip (no such ref can be fetched).
+func parseURL(s string) *url.URL {
+	u, _ := url.Parse(s)
+	return u
+}
+
+// fetchReason normalizes a fetch failure for the manifest's reason field
+// (import-by-url D5): guard refusals map to a short label, other errors lose
+// the "fetch: " package prefix.
+func fetchReason(err error) string {
+	switch {
+	case err == nil:
+		return "unfetchable"
+	case errors.Is(err, fetch.ErrBlocked):
+		return "blocked address"
+	default:
+		return strings.TrimPrefix(err.Error(), "fetch: ")
+	}
 }
 
 // externalStorePath derives a stable bucket path for a fetched external asset.
@@ -399,15 +485,6 @@ func srcsetURLs(value string) []string {
 
 func isCSPath(p string) bool {
 	return strings.EqualFold(path.Ext(p), ".css")
-}
-
-func urlDir(u string) string {
-	parsed, err := url.Parse(u)
-	if err != nil {
-		return ""
-	}
-	dir, _ := path.Split(parsed.Path)
-	return dir
 }
 
 // guessTypeFromURL types kept (unstored) refs from their extension.

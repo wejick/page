@@ -20,7 +20,7 @@ func planRefWith(t *testing.T, raw string, rules KeepRules) *plan {
 		slug: "test-1", files: map[string][]byte{}, keep: rules,
 		plans: map[string]*plan{}, toStore: map[string]File{},
 	}
-	return b.planFor(raw, "")
+	return b.planFor(raw, "", nil)
 }
 
 func planRef(t *testing.T, raw string) *plan {
