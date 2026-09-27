@@ -5,44 +5,100 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Static pages — manage</title>
 <style>
-  :root { color-scheme: light dark; }
+  /* Light theme is pinned (D1): the palette below is hardcoded light, so a
+     dark-canvas browser would otherwise render a half-dark page. */
+  :root {
+    color-scheme: light;
+    --accent: #2563eb;
+    --accent-hover: #1d4ed8;
+    --bg: #ffffff;
+    --text: #1c1e21;
+    --muted: #555b63;
+    --border: #e3e5e8;
+    --border-strong: #c3c8cf;
+    --hover: #f4f6f8;
+    --focus: #2563eb;
+    --ok-bg: #e4f3e6; --ok-border: #3a7d3a; --ok-text: #1d5620;
+    --neutral-bg: #ecedee; --neutral-border: #9ba1a8; --neutral-text: #494f56;
+    --warn-bg: #fdf1d7; --warn-border: #b8860b; --warn-text: #7a5a07;
+    --err-bg: #fbe9e9; --err-text: #7a1f16;
+  }
   body { font-family: -apple-system, system-ui, sans-serif; max-width: 960px;
-         margin: 2rem auto; padding: 0 1rem; }
+         margin: 2rem auto; padding: 0 1rem;
+         background: var(--bg); color: var(--text); }
   h1 { font-size: 1.2rem; display: inline; }
-  h1 a { text-decoration: none; }
+  h1 a { text-decoration: none; color: inherit; }
+  a { color: var(--accent); }
+  a:visited { color: var(--accent); }
+  a:hover { color: var(--accent-hover); }
   header { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
            margin-bottom: .75rem; }
   header .spacer { flex: 1; }
   .btn { display: inline-block; padding: .35rem .9rem; font-size: .95rem;
-         cursor: pointer; border: 1px solid gray; border-radius: 6px;
-         background: transparent; color: inherit; text-decoration: none; }
+         cursor: pointer; border: 1px solid var(--border-strong);
+         border-radius: 6px; background: transparent; color: inherit;
+         text-decoration: none; }
+  .btn:hover { background: var(--hover); }
+  .btn:active { background: var(--border); }
   .btn.danger { border-color: #c0392b; color: #c0392b; }
+  .btn.danger:hover { background: var(--err-bg); }
   button:disabled { opacity: .45; cursor: not-allowed; }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  .chip { padding: .25rem .7rem; font-size: .85rem; border-radius: 99px;
+          border: 1px solid var(--border-strong); background: transparent;
+          color: var(--muted); cursor: pointer; }
+  .chip:hover { background: var(--hover); }
+  .chip.warn { border-color: var(--warn-border); color: var(--warn-text);
+               background: var(--warn-bg); }
   #authrow { margin: .4rem 0 1rem; font-size: .9rem; }
   #authrow input { width: 22rem; max-width: 60vw; padding: .3rem; }
-  #authmsg { color: #c0392b; margin-left: .5rem; }
+  #authmsg { color: var(--err-text); margin-left: .5rem; }
   #flash { margin: .5rem 0; padding: .6rem 1rem; border-radius: 6px;
-           background: #fbe9e9; color: #7a1f16; display: none; }
+           background: var(--err-bg); color: var(--err-text); display: none; }
+  .tablewrap { overflow-x: auto; }
   table { border-collapse: collapse; width: 100%; font-size: .93rem; }
-  th, td { text-align: left; padding: .45rem .6rem; border-bottom: 1px solid #8884; }
+  th, td { text-align: left; padding: .45rem .6rem; border-bottom: 1px solid var(--border); }
+  tbody tr:hover { background: var(--hover); }
   td.num, th.num { text-align: right; }
   td.actions { text-align: right; white-space: nowrap; }
   td.actions .btn { margin-left: .35rem; }
   .badge { display: inline-block; padding: .1rem .55rem; border-radius: 99px;
-           font-size: .8rem; border: 1px solid #8888; }
-  .badge.live { background: #e6f6e6; border-color: #3a7d3a; color: #1d561d; }
-  .badge.parked { background: #eee; border-color: #888; color: #444; }
-  .badge.transient { background: #fdf3d7; border-color: #b8860b; color: #7a5a07; }
-  .muted { color: gray; font-size: .85rem; }
-  .err { background: #fbe9e9; }
-  .ok { background: #e6f6e6; }
+           font-size: .8rem; border: 1px solid var(--neutral-border);
+           color: var(--neutral-text); }
+  .badge.live { background: var(--ok-bg); border-color: var(--ok-border);
+                color: var(--ok-text); }
+  .badge.parked, .badge.kept-cdn { background: var(--neutral-bg);
+                border-color: var(--neutral-border); color: var(--neutral-text); }
+  /* transient lifecycle states and kept-external share the warning family:
+     both mean "in motion or at risk", everything else is settled (D3) */
+  .badge.transient, .badge.kept-external { background: var(--warn-bg);
+                border-color: var(--warn-border); color: var(--warn-text); }
+  .muted { color: var(--muted); font-size: .85rem; }
+  .note { margin: .5rem 0; padding: .5rem .8rem; border-radius: 6px;
+          background: var(--warn-bg); color: var(--warn-text); font-size: .9rem; }
+  .err { background: var(--err-bg); }
+  .ok { background: var(--ok-bg); }
   #result { margin-top: 1.25rem; padding: 1rem; border-radius: 6px; display: none; }
+  #result .sum { margin-top: .5rem; }
+  #result .sum.warn { color: var(--warn-text); }
   label { display: block; margin: 1rem 0 .3rem; font-weight: 600; }
-  input[type=text], input[type=file], select { padding: .4rem; }
-  #identifier, #file { width: 100%; box-sizing: border-box; margin-bottom: .5rem; }
+  input[type=text], select { padding: .4rem; }
+  #identifier { width: 100%; box-sizing: border-box; margin-bottom: .5rem; }
+  .dropzone { display: block; margin: .25rem 0 0; padding: 1.5rem 1rem;
+              border: 2px dashed var(--border-strong); border-radius: 8px;
+              text-align: center; color: var(--muted); font-weight: normal;
+              cursor: pointer; }
+  .dropzone:hover { border-color: var(--accent); }
+  .dropzone.over { border-color: var(--accent); background: #f0f5ff;
+                   color: var(--text); }
+  .dropzone:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
+  .dropzone .chosen { display: block; margin-top: .6rem; color: var(--text);
+                      font-size: .93rem; }
+  .visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px;
+                     overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   nav.pager { margin-top: .8rem; display: flex; gap: .75rem; align-items: center; }
   dl.meta { display: grid; grid-template-columns: max-content 1fr; gap: .25rem 1.25rem; }
-  dl.meta dt { color: gray; }
+  dl.meta dt { color: var(--muted); }
   dl.meta dd { margin: 0; }
 </style>
 </head>
@@ -50,10 +106,11 @@
 <header>
   <h1><a href="#/">Static pages</a></h1>
   <span class="spacer"></span>
+  <button id="tokenchip" class="chip" type="button"></button>
   <a class="btn" href="#/upload">+ Upload</a>
 </header>
 
-<div id="authrow">
+<div id="authrow" hidden>
   <label for="token" style="display:inline">API token</label>
   <input type="text" id="token" placeholder="bearer token" autocomplete="off">
   <span id="authmsg"></span>
@@ -68,15 +125,33 @@ const PAGE_SIZE = 50;
 const TRANSIENT = new Set(["parking", "unparking", "deleting"]);
 let listState = { offset: 0, status: "" };
 
+// Token entry is collapsed to a header chip; the input row only opens on
+// demand or when auth actually fails (D5).
+const chip = $("tokenchip");
+function syncAuthChip() {
+  const has = !!localStorage.getItem("sp-token");
+  chip.textContent = has ? "Token set" : "No token";
+  chip.classList.toggle("warn", !has);
+}
+function expandAuth(open) {
+  $("authrow").hidden = !open;
+  if (open) $("token").focus();
+}
+chip.onclick = () => expandAuth($("authrow").hidden);
+
 $("token").value = localStorage.getItem("sp-token") || "";
 let authRequired = false;
+syncAuthChip();
+expandAuth(!$("token").value.trim());
 $("token").oninput = () => {
   localStorage.setItem("sp-token", $("token").value.trim());
+  syncAuthChip();
   setAuthMsg("");
   // After a 401 sent us here, entering a token re-loads the current view
   // so the user isn't left staring at the empty page that prompted them.
+  // authRequired stays set: the first successful call clears it and
+  // collapses the entry; another 401 keeps it open with the message.
   if (authRequired && $("token").value.trim()) {
-    authRequired = false;
     route();
   }
 };
@@ -99,8 +174,27 @@ function fmtBytes(n) {
 }
 function fmtTime(iso) { return new Date(iso).toLocaleString(); }
 
-// api issues the request with the stored token; a 401 prompts for the token
-// instead of rendering an empty view.
+const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+function fmtRel(iso) {
+  const secs = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
+  if (secs < 45) return "just now";
+  const steps = [[31536000, "year"], [2592000, "month"], [604800, "week"],
+                 [86400, "day"], [3600, "hour"], [60, "minute"]];
+  for (const [limit, unit] of steps) {
+    if (secs >= limit) return rtf.format(-Math.round(secs / limit), unit);
+  }
+  return rtf.format(-1, "minute");
+}
+// relTime renders the relative duration with the absolute datetime as the
+// hover tooltip; times go stale on a long-lived view but every mutation
+// re-renders (D6).
+function relTime(iso) {
+  return `<span title="${esc(fmtTime(iso))}">${esc(fmtRel(iso))}</span>`;
+}
+
+// api issues the request with the stored token; a 401 opens the token entry
+// instead of rendering an empty view. The first successful call after a 401
+// closes it again.
 async function api(path, opts = {}) {
   const headers = Object.assign({}, opts.headers || {});
   const tok = localStorage.getItem("sp-token");
@@ -108,8 +202,14 @@ async function api(path, opts = {}) {
   const res = await fetch(path, Object.assign({}, opts, { headers }));
   if (res.status === 401) {
     authRequired = true;
+    expandAuth(true);
     setAuthMsg("A valid API token is required.");
     throw new Error("unauthorized");
+  }
+  if (authRequired) {
+    authRequired = false;
+    expandAuth(false);
+    setAuthMsg("");
   }
   return res;
 }
@@ -192,14 +292,16 @@ async function renderList() {
     return;
   }
 
+  // The identifier only repeats what the slug already says in the common
+  // case — show it when it differs.
   const rows = data.pages.map((p) => `
     <tr>
       <td><a href="#/p/${esc(encodeURIComponent(p.slug))}">${esc(p.slug)}</a>
-          <div class="muted">${esc(p.identifier)}</div></td>
+          ${p.identifier !== p.slug ? `<div class="muted">${esc(p.identifier)}</div>` : ""}</td>
       <td>${badge(p.status)}</td>
       <td class="num">${fmtBytes(p.total_bytes)}</td>
       <td class="num">${p.asset_count}</td>
-      <td>${fmtTime(p.created_at)}</td>
+      <td>${relTime(p.created_at)}</td>
       <td class="actions">
         ${p.status === "live" ? `<a class="btn" href="${esc(p.url)}" target="_blank">Open</a>` : ""}
         ${actionRow(p)}
@@ -208,6 +310,9 @@ async function renderList() {
 
   const from = data.total === 0 ? 0 : listState.offset + 1;
   const to = Math.min(listState.offset + PAGE_SIZE, data.total);
+  const emptyRow = listState.status
+    ? `<tr><td colspan="6" class="muted">No pages with this status.</td></tr>`
+    : `<tr><td colspan="6"><a class="btn" href="#/upload">+ Upload your first page</a></td></tr>`;
   view.innerHTML = `
     <p>
       <label for="statusfilter" style="display:inline">Status</label>
@@ -216,11 +321,13 @@ async function renderList() {
           `<option value="${s}" ${s === listState.status ? "selected" : ""}>${s || "all"}</option>`).join("")}
       </select>
     </p>
+    <div class="tablewrap">
     <table>
       <thead><tr><th>Page</th><th>Status</th><th class="num">Size</th>
         <th class="num">Assets</th><th>Created</th><th></th></tr></thead>
-      <tbody>${rows || `<tr><td colspan="6" class="muted">No pages${listState.status ? " with this status" : ""} yet. Upload one!</td></tr>`}</tbody>
+      <tbody>${rows || emptyRow}</tbody>
     </table>
+    </div>
     <nav class="pager">
       <button class="btn" id="prev" ${listState.offset === 0 ? "disabled" : ""}>‹ Prev</button>
       <button class="btn" id="next" ${to >= data.total ? "disabled" : ""}>Next ›</button>
@@ -251,14 +358,21 @@ async function renderDetail(slug) {
     return;
   }
 
+  // kept-external is the accepted-compromise status: it must read as a risk,
+  // not as a settled state (D3). Unstored assets report 0 bytes — an em dash
+  // instead of a misleading "0 B".
   const assets = (data.assets || []).map((a) => `
     <tr>
       <td>${esc(a.path)}</td>
       <td>${badge(a.status)}</td>
       <td>${esc(a.content_type)}</td>
-      <td class="num">${fmtBytes(a.bytes)}</td>
+      <td class="num">${a.bytes > 0 ? fmtBytes(a.bytes) : "—"}</td>
       <td class="muted">${esc(a.source_url)}</td>
     </tr>`).join("");
+  const externals = (data.assets || []).filter((a) => a.status === "kept-external").length;
+  const note = externals
+    ? `<p class="note">${externals} asset${externals > 1 ? "s" : ""} still load${externals > 1 ? "" : "s"} from the original site and may break or leak requests.</p>`
+    : "";
 
   view.innerHTML = `
     <p><a href="#/">← Back to list</a></p>
@@ -268,15 +382,18 @@ async function renderDetail(slug) {
        ${data.status === "parked" ? " · page is parked and not being served" : ""}</p>
     <dl class="meta">
       <dt>Identifier</dt><dd>${esc(data.identifier)}</dd>
-      <dt>Created</dt><dd>${fmtTime(data.created_at)}</dd>
+      <dt>Created</dt><dd>${relTime(data.created_at)}</dd>
       <dt>Total size</dt><dd>${fmtBytes(data.total_bytes)} across ${data.asset_count} assets</dd>
     </dl>
     <p>${actionRow(data) || "<span class='muted'>A transition is in progress for this page.</span>"}</p>
     <h3>Manifest</h3>
+    <div class="tablewrap">
     <table>
-      <thead><tr><th>Path</th><th>Status</th><th>Type</th><th class="num">Size</th><th>Source</th></tr></thead>
+      <thead><tr><th>Path</th><th>Storage</th><th>Type</th><th class="num">Size</th><th>Source</th></tr></thead>
       <tbody>${assets || `<tr><td colspan="5" class="muted">No assets.</td></tr>`}</tbody>
-    </table>`;
+    </table>
+    </div>
+    ${note}`;
 
   bindActions(view, () => renderDetail(slug));
 }
@@ -289,11 +406,45 @@ A new immutable page is created every time.</p>
     <label for="identifier">Identifier (optional)</label>
     <input type="text" id="identifier" placeholder="landing-page → landing-page-1">
     <label for="file">HTML file or zip pack</label>
-    <input type="file" id="file" accept=".html,.htm,.zip">
+    <label class="dropzone" id="dropzone" for="file">
+      <strong>Drop an HTML file or zip pack here</strong><br>
+      or click to browse
+      <input type="file" id="file" class="visually-hidden" accept=".html,.htm,.zip">
+      <span class="chosen" id="chosen"></span>
+    </label>
     <button id="go" class="btn">Upload</button>
     <div id="result"></div>`;
 
   const result = $("result");
+  const dropzone = $("dropzone");
+  // Client-side extension check is a hint, not the validator — the server
+  // decides. A rejected file never reaches a request (D7).
+  const validName = (f) => /\.(html|htm|zip)$/i.test(f.name);
+  function showChosen(f) {
+    $("chosen").textContent = f ? `${f.name} — ${fmtBytes(f.size)}` : "";
+  }
+  function setFile(f) {
+    if (!f) return;
+    if (!validName(f)) {
+      showChosen(null);
+      $("file").value = "";
+      result.className = "err"; result.style.display = "block";
+      result.textContent = `Unsupported file type: ${f.name}. Use .html, .htm or .zip.`;
+      return;
+    }
+    result.className = ""; result.style.display = "none";
+    const dt = new DataTransfer();
+    dt.items.add(f);
+    $("file").files = dt.files;
+    showChosen(f);
+  }
+  $("file").onchange = () => setFile($("file").files[0]);
+  ["dragenter", "dragover"].forEach((ev) =>
+    dropzone.addEventListener(ev, (e) => { e.preventDefault(); dropzone.classList.add("over"); }));
+  ["dragleave", "drop"].forEach((ev) =>
+    dropzone.addEventListener(ev, (e) => { e.preventDefault(); dropzone.classList.remove("over"); }));
+  dropzone.addEventListener("drop", (e) => setFile(e.dataTransfer.files[0]));
+
   $("go").onclick = async () => {
     const file = $("file").files[0];
     result.className = ""; result.style.display = "block";
@@ -308,8 +459,20 @@ A new immutable page is created every time.</p>
       const res = await api("/api/pages", { method: "POST", body: fd });
       const body = await res.json().catch(() => ({}));
       if (res.status === 201) {
+        // The 201 response carries the ingest counts (upload.go); surface
+        // them here so kept-external doesn't hide until someone opens the
+        // detail view (D8).
         result.classList.add("ok");
-        result.innerHTML = `Published: <a href='${esc(body.url)}' target="_blank">${esc(body.slug)}</a> — <a href="#/p/${esc(encodeURIComponent(body.slug))}">details</a>`;
+        const a = body.assets || {};
+        const parts = [];
+        if (a.baked) parts.push(a.baked + " baked");
+        if (a.local) parts.push(a.local + " local");
+        if (a.kept_cdn) parts.push(a.kept_cdn + " kept on CDN");
+        if (a.kept_external) parts.push(a.kept_external + " kept external");
+        const sum = parts.length
+          ? `<div class="sum${a.kept_external ? " warn" : ""}">Assets: ${parts.join(", ")}</div>`
+          : "";
+        result.innerHTML = `Published: <a href='${esc(body.url)}' target="_blank">${esc(body.slug)}</a> — <a href="#/p/${esc(encodeURIComponent(body.slug))}">details</a>${sum}`;
       } else {
         result.classList.add("err");
         result.textContent = "Error " + res.status + ": " + (body.error || res.statusText || "upload failed");
