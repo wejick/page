@@ -2,12 +2,12 @@ package lifecycle
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
-	"strings"
+
+	"page/internal/auth"
 )
 
 // API exposes the toggle endpoints over HTTP. Mounted by the serve package:
@@ -16,12 +16,12 @@ import (
 //	POST /api/pages/{slug}/unpark
 type API struct {
 	svc   *Service
-	token string
+	authn *auth.Checker
 }
 
 // NewAPI builds the toggle API around a Service.
-func NewAPI(svc *Service, token string) *API {
-	return &API{svc: svc, token: token}
+func NewAPI(svc *Service, authn *auth.Checker) *API {
+	return &API{svc: svc, authn: authn}
 }
 
 // Park handles POST /api/pages/{slug}/park.
@@ -80,17 +80,9 @@ func (a *API) toggle(w http.ResponseWriter, r *http.Request, run func(ctx contex
 	}
 }
 
-// auth enforces the bearer token with a constant-time compare (D9, mirroring
-// the upload handler).
+// auth delegates to the shared admin-plane checker (auth-modes D7).
 func (a *API) auth(w http.ResponseWriter, r *http.Request) bool {
-	const prefix = "Bearer "
-	got := strings.TrimPrefix(r.Header.Get("Authorization"), prefix)
-	if got == "" || subtle.ConstantTimeCompare([]byte(got), []byte(a.token)) != 1 {
-		w.Header().Set("WWW-Authenticate", `Bearer realm="api"`)
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return false
-	}
-	return true
+	return a.authn.Allow(w, r, auth.KindAPI)
 }
 
 func isNotFound(err error) bool { return errors.Is(err, ErrNotFound) }

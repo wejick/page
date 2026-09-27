@@ -35,13 +35,13 @@ func TestManagementEndToEnd(t *testing.T) {
 			MaxFiles: 2000, MaxAssetBytes: 10 << 20,
 			FetchTimeout: time.Second, FetchBudget: 5 * time.Second, FetchConcurrency: 4,
 		},
-		Keep:  ingest.KeepRules{},
-		Token: "secret",
+		Keep: ingest.KeepRules{},
+		Auth: tokenChecker(),
 	})
 	lc := lifecycle.New(pool, store)
 	ts := httptest.NewServer(serve.New(serve.Options{
 		Store: store, CacheTTL: 300 * time.Millisecond,
-		Upload: api, Lifecycle: lifecycle.NewAPI(lc, "secret"), Ping: pool.Ping,
+		Upload: api, Lifecycle: lifecycle.NewAPI(lc, tokenChecker()), Auth: tokenChecker(), Ping: pool.Ping,
 	}))
 	t.Cleanup(ts.Close)
 

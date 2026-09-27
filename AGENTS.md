@@ -42,6 +42,12 @@ don't:
   storage config only — no pool, no migrations, no bucket create, no sweep;
   `admin`/`all` own the boot duties. `db.Migrate` takes a Postgres advisory
   lock so concurrent admin replicas migrate safely.
+- **Auth is mode-gated and admin-plane-only.** One shared checker
+  (`internal/auth`) guards `/` and `/api/*`; `/p/*`, `/a/*`, `/healthz`
+  never authenticate. `AUTH_MODE` picks the mechanism — `token` (static
+  bearer, default), `none` (network/SSO proxy is the boundary), `oidc`
+  (in-app relying party + stateless signed session cookie; the bearer stays
+  as the machine path). Sessions never touch the database.
 
 ## Deployment
 

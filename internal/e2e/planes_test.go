@@ -49,12 +49,12 @@ func TestSplitPlanesServeAndAdmin(t *testing.T) {
 			Fonts: []string{"fonts.googleapis.com", "fonts.gstatic.com"},
 			JS:    []string{"cdn.jsdelivr.net"},
 		},
-		Token: "secret",
+		Auth: tokenChecker(),
 	})
 	lc := lifecycle.New(pool, store)
 	adminTS := httptest.NewServer(serve.New(serve.Options{
 		Mode: config.ModeAdmin, Store: store,
-		Upload: api, Lifecycle: lifecycle.NewAPI(lc, "secret"), Ping: pool.Ping,
+		Upload: api, Lifecycle: lifecycle.NewAPI(lc, tokenChecker()), Auth: tokenChecker(), Ping: pool.Ping,
 	}))
 	t.Cleanup(adminTS.Close)
 

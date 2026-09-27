@@ -41,14 +41,14 @@ func TestUploadAndServeEndToEnd(t *testing.T) {
 			Fonts: []string{"fonts.googleapis.com", "fonts.gstatic.com"},
 			JS:    []string{"cdn.jsdelivr.net"},
 		},
-		Token: "secret",
+		Auth: tokenChecker(),
 	})
 
 	// Short TTL so the park-propagation window is testable in seconds.
 	lc := lifecycle.New(pool, store)
 	ts := httptest.NewServer(serve.New(serve.Options{
 		Store: store, CacheTTL: 300 * time.Millisecond,
-		Upload: api, Lifecycle: lifecycle.NewAPI(lc, "secret"), Ping: pool.Ping,
+		Upload: api, Lifecycle: lifecycle.NewAPI(lc, tokenChecker()), Auth: tokenChecker(), Ping: pool.Ping,
 	}))
 	t.Cleanup(ts.Close)
 

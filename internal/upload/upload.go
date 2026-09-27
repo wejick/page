@@ -7,7 +7,6 @@ package upload
 import (
 	"bytes"
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +20,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"page/internal/auth"
 	"page/internal/config"
 	"page/internal/db"
 	"page/internal/fetch"
@@ -35,7 +35,7 @@ type Handler struct {
 	store storage.Storage
 	caps  config.Caps
 	keep  ingest.KeepRules
-	token string
+	authn *auth.Checker
 	guard fetch.GuardFunc
 }
 
@@ -45,7 +45,7 @@ type Options struct {
 	Store storage.Storage
 	Caps  config.Caps
 	Keep  ingest.KeepRules
-	Token string
+	Auth  *auth.Checker   // admin-plane authenticator (auth-modes D7)
 	Guard fetch.GuardFunc // SSRF guard for outbound fetches; nil → fetch.Standard
 }
 
@@ -55,7 +55,7 @@ func New(o Options) *Handler {
 	if guard == nil {
 		guard = fetch.Standard
 	}
-	return &Handler{pool: o.Pool, store: o.Store, caps: o.Caps, keep: o.Keep, token: o.Token, guard: guard}
+	return &Handler{pool: o.Pool, store: o.Store, caps: o.Caps, keep: o.Keep, authn: o.Auth, guard: guard}
 }
 
 // Create handles POST /api/pages.
@@ -320,16 +320,10 @@ func (h *Handler) putObjects(ctx context.Context, slugStr string, res *ingest.Re
 	return nil
 }
 
-// auth enforces the bearer token with a constant-time compare (D9).
+// auth delegates to the shared admin-plane checker (auth-modes D7); every
+// mode's accept rule lives there.
 func (h *Handler) auth(w http.ResponseWriter, r *http.Request) bool {
-	const prefix = "Bearer "
-	got := strings.TrimPrefix(r.Header.Get("Authorization"), prefix)
-	if got == "" || subtle.ConstantTimeCompare([]byte(got), []byte(h.token)) != 1 {
-		w.Header().Set("WWW-Authenticate", `Bearer realm="api"`)
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return false
-	}
-	return true
+	return h.authn.Allow(w, r, auth.KindAPI)
 }
 
 func (h *Handler) fail(w http.ResponseWriter, r *http.Request, what string, err error) {

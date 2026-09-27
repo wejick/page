@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"page/internal/auth"
 	"page/internal/config"
 	"page/internal/db"
 	"page/internal/ingest"
@@ -96,6 +97,23 @@ func runAdminAll(ctx context.Context, cfg config.Config) error {
 		return err
 	}
 
+	// Admin-plane auth per AUTH_MODE (auth-modes D1/D7). In oidc mode the
+	// boot runs discovery, so a misconfigured IdP fails startup here.
+	var oidcFlow *auth.OIDC
+	if cfg.AuthMode == config.AuthModeOIDC {
+		discoveryCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		oidcFlow, err = auth.NewOIDC(discoveryCtx, cfg.OIDC, cfg.SessionSecret)
+		cancel()
+		if err != nil {
+			return err
+		}
+	}
+	checker := auth.NewChecker(cfg.AuthMode, cfg.AuthToken, oidcFlow)
+	if cfg.AuthMode == config.AuthModeNone {
+		slog.Warn("admin plane is unauthenticated (AUTH_MODE=none); " +
+			"network- or proxy-level protection is required")
+	}
+
 	api := upload.New(upload.Options{
 		Pool:  pool,
 		Store: store,
@@ -104,12 +122,13 @@ func runAdminAll(ctx context.Context, cfg config.Config) error {
 			Fonts: cfg.KeepExternal.Fonts, JS: cfg.KeepExternal.JS,
 			Icons: cfg.KeepExternal.Icons, Misc: cfg.KeepExternal.Misc,
 		},
-		Token: cfg.AuthToken,
+		Auth: checker,
 	})
 
 	opts := baseOptions(cfg, store)
 	opts.Upload = api
-	opts.Lifecycle = lifecycle.NewAPI(lc, cfg.AuthToken)
+	opts.Lifecycle = lifecycle.NewAPI(lc, checker)
+	opts.Auth = checker
 	opts.Ping = pool.Ping
 	return listen(ctx, cfg, opts)
 }

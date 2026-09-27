@@ -65,7 +65,7 @@ func TestImportByURLEndToEnd(t *testing.T) {
 			FetchTimeout: time.Second, FetchBudget: 5 * time.Second, FetchConcurrency: 4,
 		},
 		Keep:  ingest.KeepRules{Fonts: []string{"fonts.googleapis.com"}},
-		Token: "secret",
+		Auth:  tokenChecker(),
 		Guard: fetch.Permissive, // the source is a loopback httptest server
 	})
 	ts := httptest.NewServer(serve.New(serve.Options{

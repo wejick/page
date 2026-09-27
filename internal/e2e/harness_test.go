@@ -15,6 +15,7 @@ import (
 	miniomod "github.com/testcontainers/testcontainers-go/modules/minio"
 	postgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 
+	"page/internal/auth"
 	"page/internal/config"
 	"page/internal/db"
 	"page/internal/storage/s3compat"
@@ -130,4 +131,10 @@ func uploadBody(t *testing.T, pack map[string]string, identifier string) (*bytes
 	_ = mw.WriteField("identifier", identifier)
 	_ = mw.Close()
 	return mb, mw.FormDataContentType()
+}
+
+// tokenChecker builds the static-bearer checker the classic journeys
+// authenticate with (auth-modes D1: the default mode is unchanged).
+func tokenChecker() *auth.Checker {
+	return auth.NewChecker(config.AuthModeToken, "secret", nil)
 }

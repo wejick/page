@@ -23,17 +23,40 @@ const (
 	ModeAll   Mode = "all"
 )
 
+// AuthMode selects how the admin plane authenticates requests (auth-modes
+// D1): AuthModeToken is the static bearer (historical default),
+// AuthModeNone delegates to the network/SSO proxy, AuthModeOIDC makes the
+// app an OIDC relying party with a stateless session cookie.
+type AuthMode string
+
+const (
+	AuthModeToken AuthMode = "token"
+	AuthModeNone  AuthMode = "none"
+	AuthModeOIDC  AuthMode = "oidc"
+)
+
+// OIDC configures the relying party for AuthModeOIDC (auth-modes D2, D4).
+type OIDC struct {
+	Issuer       string
+	ClientID     string
+	ClientSecret string
+	RedirectURL  string
+}
+
 // Config is the fully-parsed service configuration.
 type Config struct {
 	Addr        string
 	Mode        Mode // which planes this instance serves
 	DatabaseURL string
+	AuthMode    AuthMode
 	AuthToken   string
 	CacheTTL    time.Duration // entry-HTML cache revalidation interval
 
-	Storage      Storage
-	Caps         Caps
-	KeepExternal KeepExternal
+	Storage       Storage
+	OIDC          OIDC
+	SessionSecret string
+	Caps          Caps
+	KeepExternal  KeepExternal
 }
 
 // Storage configures the storage driver. Driver is "s3compat" or "mem".
@@ -82,14 +105,54 @@ func Load(get func(string) string) (Config, error) {
 		}
 	}
 	cfg.DatabaseURL = get("DATABASE_URL")
+	cfg.AuthMode = AuthModeToken
+	if v := get("AUTH_MODE"); v != "" {
+		switch AuthMode(v) {
+		case AuthModeToken, AuthModeNone, AuthModeOIDC:
+			cfg.AuthMode = AuthMode(v)
+		default:
+			errs = append(errs, fmt.Errorf("AUTH_MODE must be token, none, or oidc, got %q", v))
+		}
+	}
 	cfg.AuthToken = get("AUTH_TOKEN")
+	cfg.SessionSecret = get("SESSION_SECRET")
+	cfg.OIDC = OIDC{
+		Issuer:       get("OIDC_ISSUER"),
+		ClientID:     get("OIDC_CLIENT_ID"),
+		ClientSecret: get("OIDC_CLIENT_SECRET"),
+		RedirectURL:  get("OIDC_REDIRECT_URL"),
+	}
 	cfg.CacheTTL = dur(get, "HTML_CACHE_TTL", 60*time.Second)
 	if cfg.Mode != ModeServe {
 		if cfg.DatabaseURL == "" {
 			errs = append(errs, fmt.Errorf("DATABASE_URL is required"))
 		}
-		if cfg.AuthToken == "" {
-			errs = append(errs, fmt.Errorf("AUTH_TOKEN is required"))
+		// Per-mode auth requirements (auth-modes D1): the default stays
+		// fail-closed; none is strict (a mode that sometimes checks cannot
+		// be reasoned about); oidc needs its IdP wiring plus the session
+		// signing secret, with the bearer remaining optional as the machine
+		// path.
+		switch cfg.AuthMode {
+		case AuthModeToken:
+			if cfg.AuthToken == "" {
+				errs = append(errs, fmt.Errorf("AUTH_TOKEN is required when AUTH_MODE=token"))
+			}
+		case AuthModeNone:
+			if cfg.AuthToken != "" {
+				errs = append(errs, fmt.Errorf("AUTH_TOKEN must be empty when AUTH_MODE=none (none accepts no credentials)"))
+			}
+		case AuthModeOIDC:
+			for _, kv := range []struct{ key, val string }{
+				{"OIDC_ISSUER", cfg.OIDC.Issuer},
+				{"OIDC_CLIENT_ID", cfg.OIDC.ClientID},
+				{"OIDC_CLIENT_SECRET", cfg.OIDC.ClientSecret},
+				{"OIDC_REDIRECT_URL", cfg.OIDC.RedirectURL},
+				{"SESSION_SECRET", cfg.SessionSecret},
+			} {
+				if kv.val == "" {
+					errs = append(errs, fmt.Errorf("%s is required when AUTH_MODE=oidc", kv.key))
+				}
+			}
 		}
 	}
 

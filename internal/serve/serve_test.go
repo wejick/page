@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"page/internal/auth"
 	"page/internal/config"
 	"page/internal/lifecycle"
 	"page/internal/storage"
@@ -125,8 +126,8 @@ func TestPlaneScopedRouting(t *testing.T) {
 	newOpts := func(mode config.Mode) Options {
 		o := Options{Mode: mode}
 		if mode != config.ModeServe {
-			o.Upload = upload.New(upload.Options{Token: testToken})
-			o.Lifecycle = lifecycle.NewAPI(lifecycle.New(nil, nil), testToken)
+			o.Upload = upload.New(upload.Options{Auth: auth.NewChecker(config.AuthModeToken, testToken, nil)})
+			o.Lifecycle = lifecycle.NewAPI(lifecycle.New(nil, nil), auth.NewChecker(config.AuthModeToken, testToken, nil))
 		}
 		return o
 	}

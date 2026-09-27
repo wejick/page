@@ -105,7 +105,7 @@
   dl.meta dd { margin: 0; }
 </style>
 </head>
-<body>
+<body data-auth-mode="token">
 <header>
   <h1><a href="#/">Static pages</a></h1>
   <span class="spacer"></span>
@@ -129,7 +129,11 @@ const TRANSIENT = new Set(["parking", "unparking", "deleting"]);
 let listState = { offset: 0, status: "" };
 
 // Token entry is collapsed to a header chip; the input row only opens on
-// demand or when auth actually fails (D5).
+// demand or when auth actually fails (D5). The chip exists only in token
+// mode: none mode needs no credentials, and oidc mode's browser flow
+// redirects to /login instead (auth-modes D8).
+const AUTH_MODE = document.body.dataset.authMode || "token";
+let authRequired = false;
 const chip = $("tokenchip");
 function syncAuthChip() {
   const has = !!localStorage.getItem("sp-token");
@@ -140,24 +144,26 @@ function expandAuth(open) {
   $("authrow").hidden = !open;
   if (open) $("token").focus();
 }
-chip.onclick = () => expandAuth($("authrow").hidden);
-
-$("token").value = localStorage.getItem("sp-token") || "";
-let authRequired = false;
-syncAuthChip();
-expandAuth(!$("token").value.trim());
-$("token").oninput = () => {
-  localStorage.setItem("sp-token", $("token").value.trim());
+if (AUTH_MODE === "token") {
+  chip.onclick = () => expandAuth($("authrow").hidden);
+  $("token").value = localStorage.getItem("sp-token") || "";
   syncAuthChip();
-  setAuthMsg("");
-  // After a 401 sent us here, entering a token re-loads the current view
-  // so the user isn't left staring at the empty page that prompted them.
-  // authRequired stays set: the first successful call clears it and
-  // collapses the entry; another 401 keeps it open with the message.
-  if (authRequired && $("token").value.trim()) {
-    route();
-  }
-};
+  expandAuth(!$("token").value.trim());
+  $("token").oninput = () => {
+    localStorage.setItem("sp-token", $("token").value.trim());
+    syncAuthChip();
+    setAuthMsg("");
+    // After a 401 sent us here, entering a token re-loads the current view
+    // so the user isn't left staring at the empty page that prompted them.
+    // authRequired stays set: the first successful call clears it and
+    // collapses the entry; another 401 keeps it open with the message.
+    if (authRequired && $("token").value.trim()) {
+      route();
+    }
+  };
+} else {
+  chip.hidden = true;
+}
 
 function setAuthMsg(msg) { $("authmsg").textContent = msg; }
 function flash(msg) {
@@ -195,15 +201,20 @@ function relTime(iso) {
   return `<span title="${esc(fmtTime(iso))}">${esc(fmtRel(iso))}</span>`;
 }
 
-// api issues the request with the stored token; a 401 opens the token entry
-// instead of rendering an empty view. The first successful call after a 401
-// closes it again.
+// api issues the request with the stored token (token mode) or the session
+// cookie (oidc mode), always carrying the CSRF header the oidc mode's
+// state-changing rules require. A 401 opens the token entry in token mode
+// and navigates to /login in oidc mode.
 async function api(path, opts = {}) {
-  const headers = Object.assign({}, opts.headers || {});
+  const headers = Object.assign({ "X-Requested-With": "page-ui" }, opts.headers || {});
   const tok = localStorage.getItem("sp-token");
   if (tok) headers["Authorization"] = "Bearer " + tok;
   const res = await fetch(path, Object.assign({}, opts, { headers }));
   if (res.status === 401) {
+    if (AUTH_MODE === "oidc") {
+      location.href = "/login";
+      throw new Error("unauthorized");
+    }
     authRequired = true;
     expandAuth(true);
     setAuthMsg("A valid API token is required.");
@@ -501,7 +512,9 @@ A new immutable page is created every time.</p>
     } catch (e) {
       if (e.message === "unauthorized") {
         result.classList.add("err");
-        result.textContent = "Enter a valid API token first.";
+        result.textContent = AUTH_MODE === "oidc"
+          ? "Session expired — redirecting to login."
+          : "Enter a valid API token first.";
       } else {
         result.classList.add("err");
         result.textContent = "Upload failed: " + e;

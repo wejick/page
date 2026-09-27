@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	postgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 
+	"page/internal/auth"
 	"page/internal/config"
 	"page/internal/db"
 	"page/internal/fetch"
@@ -59,7 +60,7 @@ func newTestHandler(t *testing.T, ctx context.Context, rawCap int64, guard fetch
 			Fonts: []string{"fonts.googleapis.com", "fonts.gstatic.com"},
 			JS:    []string{"cdn.jsdelivr.net"},
 		},
-		Token: "secret",
+		Auth:  auth.NewChecker(config.AuthModeToken, "secret", nil),
 		Guard: guard,
 	})
 	return h, store, pool

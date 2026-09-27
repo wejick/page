@@ -60,7 +60,10 @@ but never reuses its code — slug counters only move forward.
 |---|---|---|
 | `SERVER_MODE` | `all` | `serve` pages/assets only · `admin` upload UI + API only · `all` everything |
 | `DATABASE_URL` | `postgres://page:page@localhost:5432/page` | not needed in serve mode |
-| `AUTH_TOKEN` | `devtoken` | bearer token for `/api/*`; not needed in serve mode |
+| `AUTH_MODE` | `token` | admin-plane auth: `token` static bearer · `none` proxy/network-protected · `oidc` SSO login (see below) |
+| `AUTH_TOKEN` | `devtoken` | bearer token for `/api/*`; required in `token` mode, forbidden in `none`, optional in `oidc` (machine path) |
+| `OIDC_ISSUER` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` / `OIDC_REDIRECT_URL` | — | required when `AUTH_MODE=oidc`; redirect URL is `{base}/auth/callback` |
+| `SESSION_SECRET` | — | required when `AUTH_MODE=oidc`; generate with `openssl rand -hex 32`. Rotating it logs everyone out |
 | `STORAGE_DRIVER` | `s3compat` | or `mem` (tests) |
 | `S3_ENDPOINT` | `localhost:9000` | required for s3compat |
 | `S3_ACCESS_KEY` / `S3_SECRET_KEY` | `minioadmin` | required for s3compat |
@@ -72,6 +75,25 @@ but never reuses its code — slug counters only move forward.
 
 Storage works with any S3-compatible endpoint (AWS S3, R2, B2, Spaces,
 MinIO, …), configured entirely via env.
+
+### Admin auth modes
+
+`AUTH_MODE` picks how the admin plane (`/` and `/api/*`) authenticates.
+Pages (`/p/*`, `/a/*`) and `/healthz` are always public.
+
+- **`token`** (default): every API call needs the static bearer. Works
+  anywhere; the UI asks for the token and stores it in `localStorage`.
+- **`none`**: no in-app auth — the deployment is protected by network
+  position and/or an authenticating reverse proxy (oauth2-proxy, nginx,
+  Tailscale, …). Boot logs a warning; `AUTH_TOKEN` must be unset. The admin
+  instance must never be directly reachable by untrusted clients.
+- **`oidc`**: the app is an OIDC relying party. Register a client with your
+  IdP (redirect `{base}/auth/callback`, scope `openid email`), set the four
+  `OIDC_*` variables plus `SESSION_SECRET`, and browsers log in through the
+  IdP; unauthenticated visits to `/` redirect to `/login`. If `AUTH_TOKEN`
+  is also set it keeps working as the machine path for CI/scripts. Sessions
+  are stateless signed cookies (12h); rotating `SESSION_SECRET` revokes
+  them all.
 
 The full variable list and validation rules are in `internal/config`; the
 production deployment guide is in [AGENTS.md](AGENTS.md).

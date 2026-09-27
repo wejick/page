@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"page/internal/auth"
 	"page/internal/config"
 	"page/internal/lifecycle"
 	"page/internal/storage"
@@ -32,6 +33,7 @@ type Options struct {
 	CacheTTL      time.Duration               // entry-HTML revalidation interval; 0 → default 60s
 	Upload        *upload.Handler             // upload API (admin/all planes)
 	Lifecycle     *lifecycle.API              // park/unpark endpoints (admin/all planes); nil omits them
+	Auth          *auth.Checker               // admin-plane auth (auth-modes D7); nil or flowless fails closed
 	Ping          func(context.Context) error // health probe; storage Stat in serve mode, Postgres ping in admin/all
 }
 
@@ -40,6 +42,7 @@ type Handler struct {
 	store storage.Storage
 	cache *htmlCache
 	api   *upload.Handler
+	authn *auth.Checker
 	ping  func(context.Context) error
 }
 
@@ -47,21 +50,22 @@ type Handler struct {
 // serve mounts only the page/asset routes and health, admin only the upload
 // UI and admin API, all (including the zero value) everything.
 func New(o Options) http.Handler {
-	h := &Handler{store: o.Store, api: o.Upload, ping: o.Ping}
+	h := &Handler{store: o.Store, api: o.Upload, authn: o.Auth, ping: o.Ping}
 	h.cache = newHTMLCache(o.CacheMaxBytes, o.CacheTTL)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", h.healthz)
 
-	// Upload API (auth inside the handler, D9). Serve mode never builds
-	// these deps; a nil one simply mounts nothing instead of panicking.
+	// Upload API (auth inside the handler via the shared checker, auth-modes
+	// D7). Serve mode never builds these deps; a nil one simply mounts
+	// nothing instead of panicking.
 	api := func() {
 		if o.Upload != nil {
 			mux.Handle("POST /api/pages", o.Upload.Create())
 			mux.Handle("GET /api/pages/{slug}", o.Upload.Get())
 			mux.Handle("GET /api/pages", o.Upload.List())
 		}
-		// Park/unpark toggle and hard delete (auth inside the handler).
+		// Park/unpark toggle and hard delete (same checker).
 		if o.Lifecycle != nil {
 			mux.Handle("POST /api/pages/{slug}/park", o.Lifecycle.Park())
 			mux.Handle("POST /api/pages/{slug}/unpark", o.Lifecycle.Unpark())
@@ -84,6 +88,14 @@ func New(o Options) http.Handler {
 	if o.Mode != config.ModeServe {
 		mux.HandleFunc("GET /{$}", h.ui)
 		api()
+		// The browser half of the OIDC flow mounts only when the flow is
+		// actually wired (auth-modes D5): a flowless oidc checker fails
+		// closed instead of mounting nil handlers.
+		if o.Auth.HasFlow() {
+			mux.Handle("GET /login", o.Auth.Login())
+			mux.Handle("GET /auth/callback", o.Auth.Callback())
+			mux.Handle("POST /logout", o.Auth.Logout())
+		}
 	}
 	if o.Mode != config.ModeAdmin {
 		pages()
@@ -100,12 +112,24 @@ const (
 	cacheControlEntry = "public, max-age=60, must-revalidate"
 )
 
+// ui serves the management shell. In oidc mode an unauthenticated browser is
+// redirected to /login (auth-modes D7); the shell always learns its auth
+// mode from the injected data-auth-mode attribute (auth-modes D8).
 func (h *Handler) ui(w http.ResponseWriter, r *http.Request) {
+	if h.authn != nil && !h.authn.Allow(w, r, auth.KindBrowser) {
+		return
+	}
 	page, err := staticFS.ReadFile("static/index.html")
 	if err != nil {
 		http.Error(w, "ui missing", http.StatusInternalServerError)
 		return
 	}
+	mode := "token"
+	if h.authn != nil {
+		mode = string(h.authn.Mode())
+	}
+	page = []byte(strings.Replace(string(page),
+		`data-auth-mode="token"`, `data-auth-mode="`+mode+`"`, 1))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(page)
 }

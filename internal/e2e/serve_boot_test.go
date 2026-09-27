@@ -52,12 +52,12 @@ func TestServeModeBootsWithoutDatabase(t *testing.T) {
 			Fonts: []string{"fonts.googleapis.com", "fonts.gstatic.com"},
 			JS:    []string{"cdn.jsdelivr.net"},
 		},
-		Token: "secret",
+		Auth: tokenChecker(),
 	})
 	lc := lifecycle.New(pool, store)
 	ts := httptest.NewServer(serve.New(serve.Options{
 		Mode: config.ModeAll, Store: store, CacheTTL: time.Second,
-		Upload: api, Lifecycle: lifecycle.NewAPI(lc, "secret"), Ping: pool.Ping,
+		Upload: api, Lifecycle: lifecycle.NewAPI(lc, tokenChecker()), Auth: tokenChecker(), Ping: pool.Ping,
 	}))
 
 	mb, contentType := uploadBody(t, seedPack, "serveboot")

@@ -108,6 +108,137 @@ func TestLoad(t *testing.T) {
 	}
 }
 
+// TestLoadAuthMode covers the AUTH_MODE validation matrix (auth-modes D1):
+// token is the fail-closed default, none strictly forbids a token, oidc
+// requires its IdP wiring, and serve mode requires none of it.
+func TestLoadAuthMode(t *testing.T) {
+	adminEnv := func(extra map[string]string) map[string]string {
+		env := map[string]string{"DATABASE_URL": "p", "STORAGE_DRIVER": "mem"}
+		for k, v := range extra {
+			env[k] = v
+		}
+		return env
+	}
+	oidcEnv := func(extra map[string]string) map[string]string {
+		env := adminEnv(map[string]string{
+			"AUTH_MODE":          "oidc",
+			"OIDC_ISSUER":        "https://idp.example.com",
+			"OIDC_CLIENT_ID":     "page",
+			"OIDC_CLIENT_SECRET": "s3cret",
+			"OIDC_REDIRECT_URL":  "https://pages.example.com/auth/callback",
+			"SESSION_SECRET":     "0123456789abcdef",
+		})
+		for k, v := range extra {
+			if v == "" {
+				delete(env, k)
+			} else {
+				env[k] = v
+			}
+		}
+		return env
+	}
+
+	tests := []struct {
+		name        string
+		env         map[string]string
+		wantErr     bool
+		errContains []string
+		check       func(t *testing.T, c Config)
+	}{
+		{
+			name:        "default token mode requires AUTH_TOKEN",
+			env:         adminEnv(nil),
+			wantErr:     true,
+			errContains: []string{"AUTH_TOKEN", "AUTH_MODE=token"},
+		},
+		{
+			name: "explicit token mode with token boots",
+			env:  adminEnv(map[string]string{"AUTH_MODE": "token", "AUTH_TOKEN": "t"}),
+			check: func(t *testing.T, c Config) {
+				if c.AuthMode != AuthModeToken {
+					t.Fatalf("auth mode = %q", c.AuthMode)
+				}
+			},
+		},
+		{
+			name:        "none mode rejects a configured token",
+			env:         adminEnv(map[string]string{"AUTH_MODE": "none", "AUTH_TOKEN": "t"}),
+			wantErr:     true,
+			errContains: []string{"AUTH_TOKEN", "none"},
+		},
+		{
+			name: "none mode boots without any credentials",
+			env:  adminEnv(map[string]string{"AUTH_MODE": "none"}),
+			check: func(t *testing.T, c Config) {
+				if c.AuthMode != AuthModeNone || c.AuthToken != "" {
+					t.Fatalf("config = mode %q token %q", c.AuthMode, c.AuthToken)
+				}
+			},
+		},
+		{
+			name:        "oidc mode missing every variable names them all",
+			env:         adminEnv(map[string]string{"AUTH_MODE": "oidc"}),
+			wantErr:     true,
+			errContains: []string{"OIDC_ISSUER", "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET", "OIDC_REDIRECT_URL", "SESSION_SECRET"},
+		},
+		{
+			name:        "oidc mode missing only the session secret",
+			env:         oidcEnv(map[string]string{"SESSION_SECRET": ""}),
+			wantErr:     true,
+			errContains: []string{"SESSION_SECRET"},
+		},
+		{
+			name: "oidc mode boots with an optional machine token",
+			env:  oidcEnv(map[string]string{"AUTH_TOKEN": "machine"}),
+			check: func(t *testing.T, c Config) {
+				if c.OIDC.Issuer != "https://idp.example.com" || c.SessionSecret == "" || c.AuthToken != "machine" {
+					t.Fatalf("oidc config = %+v token %q", c.OIDC, c.AuthToken)
+				}
+			},
+		},
+		{
+			name:        "invalid auth mode names the valid values",
+			env:         adminEnv(map[string]string{"AUTH_MODE": "kerberos", "AUTH_TOKEN": "t"}),
+			wantErr:     true,
+			errContains: []string{"AUTH_MODE", "token", "none", "oidc"},
+		},
+		{
+			name: "serve mode ignores auth requirements entirely",
+			env: map[string]string{
+				"SERVER_MODE": "serve", "STORAGE_DRIVER": "mem", "AUTH_MODE": "oidc",
+			},
+			check: func(t *testing.T, c Config) {
+				if c.Mode != ModeServe || c.AuthMode != AuthModeOIDC {
+					t.Fatalf("mode = %q auth = %q", c.Mode, c.AuthMode)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := Load(func(key string) string { return tt.env[key] })
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("Load() err = nil, want error")
+				}
+				for _, s := range tt.errContains {
+					if !strings.Contains(err.Error(), s) {
+						t.Fatalf("Load() err = %q, want it to mention %q", err, s)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load() err = %v", err)
+			}
+			if tt.check != nil {
+				tt.check(t, cfg)
+			}
+		})
+	}
+}
+
 func TestLoadMode(t *testing.T) {
 	tests := []struct {
 		name        string

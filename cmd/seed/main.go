@@ -14,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"page/internal/auth"
 	"page/internal/config"
 	"page/internal/db"
 	"page/internal/ingest"
@@ -62,6 +63,9 @@ func run() error {
 		store = s3
 	}
 
+	// The in-process API uses the same admin-plane auth as cmd/server, but
+	// without the OIDC flow — seed authenticates through the machine path.
+	checker := auth.NewChecker(cfg.AuthMode, cfg.AuthToken, nil)
 	api := upload.New(upload.Options{
 		Pool:  pool,
 		Store: store,
@@ -70,9 +74,9 @@ func run() error {
 			Fonts: cfg.KeepExternal.Fonts, JS: cfg.KeepExternal.JS,
 			Icons: cfg.KeepExternal.Icons, Misc: cfg.KeepExternal.Misc,
 		},
-		Token: cfg.AuthToken,
+		Auth: checker,
 	})
-	ts := httptest.NewServer(serve.New(serve.Options{Store: store, Upload: api, Ping: pool.Ping}))
+	ts := httptest.NewServer(serve.New(serve.Options{Store: store, Upload: api, Auth: checker, Ping: pool.Ping}))
 	defer ts.Close()
 
 	// Build the sample pack in memory: a Framer-style export with local
@@ -110,7 +114,7 @@ func run() error {
 		return err
 	}
 
-	// POST through the real API (multipart, bearer token).
+	// POST through the real API (multipart, bearer token when configured).
 	body := &bytes.Buffer{}
 	mw := multipart.NewWriter(body)
 	fw, err := mw.CreateFormFile("file", "sample.zip")
@@ -131,7 +135,10 @@ func run() error {
 		return err
 	}
 	req.Header.Set("Content-Type", mw.FormDataContentType())
-	req.Header.Set("Authorization", "Bearer "+cfg.AuthToken)
+	req.Header.Set("X-Requested-With", "page-ui")
+	if cfg.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+cfg.AuthToken)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err

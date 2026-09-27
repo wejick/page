@@ -15,6 +15,7 @@ import (
 	miniomod "github.com/testcontainers/testcontainers-go/modules/minio"
 	postgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 
+	"page/internal/auth"
 	"page/internal/config"
 	"page/internal/db"
 	"page/internal/storage"
@@ -77,7 +78,7 @@ func start(t *testing.T) *harness {
 	ensureBucket(t, ctx, store)
 
 	svc := New(pool, store)
-	return &harness{pool: pool, store: store, svc: svc, api: NewAPI(svc, "secret")}
+	return &harness{pool: pool, store: store, svc: svc, api: NewAPI(svc, auth.NewChecker(config.AuthModeToken, "secret", nil))}
 }
 
 // ensureBucket retries bucket creation: MinIO's health endpoint can answer
