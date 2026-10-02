@@ -45,12 +45,12 @@ type OIDC struct {
 
 // Config is the fully-parsed service configuration.
 type Config struct {
-	Addr        string
-	Mode        Mode // which planes this instance serves
-	DatabaseURL string
-	AuthMode    AuthMode
-	AuthToken   string
-	CacheTTL    time.Duration // entry-HTML cache revalidation interval
+	Addr       string
+	Mode       Mode   // which planes this instance serves
+	SQLitePath string // write-side SQLite database file (admin/all modes)
+	AuthMode   AuthMode
+	AuthToken  string
+	CacheTTL   time.Duration // entry-HTML cache revalidation interval
 
 	Storage       Storage
 	OIDC          OIDC
@@ -104,7 +104,7 @@ func Load(get func(string) string) (Config, error) {
 			errs = append(errs, fmt.Errorf("SERVER_MODE must be serve, admin, or all, got %q", v))
 		}
 	}
-	cfg.DatabaseURL = get("DATABASE_URL")
+	cfg.SQLitePath = get("SQLITE_PATH")
 	cfg.AuthMode = AuthModeToken
 	if v := get("AUTH_MODE"); v != "" {
 		switch AuthMode(v) {
@@ -124,8 +124,8 @@ func Load(get func(string) string) (Config, error) {
 	}
 	cfg.CacheTTL = dur(get, "HTML_CACHE_TTL", 60*time.Second)
 	if cfg.Mode != ModeServe {
-		if cfg.DatabaseURL == "" {
-			errs = append(errs, fmt.Errorf("DATABASE_URL is required"))
+		if cfg.SQLitePath == "" {
+			errs = append(errs, fmt.Errorf("SQLITE_PATH is required"))
 		}
 		// Per-mode auth requirements (auth-modes D1): the default stays
 		// fail-closed; none is strict (a mode that sometimes checks cannot

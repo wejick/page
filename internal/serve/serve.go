@@ -34,7 +34,7 @@ type Options struct {
 	Upload        *upload.Handler             // upload API (admin/all planes)
 	Lifecycle     *lifecycle.API              // park/unpark endpoints (admin/all planes); nil omits them
 	Auth          *auth.Checker               // admin-plane auth (auth-modes D7); nil or flowless fails closed
-	Ping          func(context.Context) error // health probe; storage Stat in serve mode, Postgres ping in admin/all
+	Ping          func(context.Context) error // health probe; storage Stat in serve mode, database ping in admin/all
 }
 
 // Handler serves pages and assets.

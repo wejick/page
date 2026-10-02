@@ -5,12 +5,14 @@ package slug
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	sqlite "modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // MaxIdentifierLen caps the sanitized identifier.
@@ -62,11 +64,12 @@ func Compose(identifier string, code int) string {
 
 // Allocate returns the next code for identifier, atomically, starting at 1.
 // The upsert is the concurrency guarantee; the unique index on
-// pages(identifier, code) is the backstop.
-func Allocate(ctx context.Context, pool *pgxpool.Pool, identifier string) (int, error) {
+// pages(identifier, code) is the backstop. SQLite serializes writers, so the
+// single statement is atomic as-is.
+func Allocate(ctx context.Context, db *sql.DB, identifier string) (int, error) {
 	var code int
-	err := pool.QueryRow(ctx, `
-		INSERT INTO counters (identifier, next) VALUES ($1, 2)
+	err := db.QueryRowContext(ctx, `
+		INSERT INTO counters (identifier, next) VALUES (?1, 2)
 		ON CONFLICT (identifier) DO UPDATE SET next = counters.next + 1
 		RETURNING next - 1`, identifier,
 	).Scan(&code)
@@ -78,7 +81,7 @@ func Allocate(ctx context.Context, pool *pgxpool.Pool, identifier string) (int, 
 
 // New sanitizes + validates the identifier and allocates its next code.
 // It does not insert the page row; the caller owns that transaction boundary.
-func New(ctx context.Context, pool *pgxpool.Pool, rawIdentifier string) (string, int, error) {
+func New(ctx context.Context, db *sql.DB, rawIdentifier string) (string, int, error) {
 	identifier, err := Sanitize(rawIdentifier)
 	if err != nil {
 		return "", 0, err
@@ -86,18 +89,19 @@ func New(ctx context.Context, pool *pgxpool.Pool, rawIdentifier string) (string,
 	if err := Validate(identifier); err != nil {
 		return "", 0, err
 	}
-	code, err := Allocate(ctx, pool, identifier)
+	code, err := Allocate(ctx, db, identifier)
 	if err != nil {
 		return "", 0, err
 	}
 	return Compose(identifier, code), code, nil
 }
 
-// IsUniqueViolation reports whether err is a Postgres unique violation (23505).
+// IsUniqueViolation reports whether err is a SQLite unique-constraint
+// failure (the upload retry loop's slug-collision backstop).
 func IsUniqueViolation(err error) bool {
-	var pgErr interface{ SQLState() string }
-	if errors.As(err, &pgErr) {
-		return pgErr.SQLState() == "23505"
+	var sqErr *sqlite.Error
+	if errors.As(err, &sqErr) {
+		return sqErr.Code() == sqlite3.SQLITE_CONSTRAINT_UNIQUE
 	}
 	return false
 }

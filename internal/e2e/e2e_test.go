@@ -1,6 +1,6 @@
 //go:build integration
 
-// Package e2e exercises the whole service against real MinIO + Postgres:
+// Package e2e exercises the whole service against real MinIO + SQLite:
 // upload a Framer-style zip through the API, then serve it through the
 // public router (dual-mount, redirects, 404s) — the same URL contract the
 // production CDN must satisfy (design D14).
@@ -25,13 +25,12 @@ import (
 func TestUploadAndServeEndToEnd(t *testing.T) {
 	ctx := context.Background()
 
-	pg := startPostgres(t, ctx)
-	pool := pg.Pool
+	pool := startDB(t)
 	store, _ := startMinio(t, ctx)
 
 	// The full router over real storage.
 	api := upload.New(upload.Options{
-		Pool: pool, Store: store,
+		DB: pool, Store: store,
 		Caps: config.Caps{
 			MaxRawBytes: 25 << 20, MaxDecompressedBytes: 100 << 20,
 			MaxFiles: 2000, MaxAssetBytes: 10 << 20,
@@ -48,7 +47,7 @@ func TestUploadAndServeEndToEnd(t *testing.T) {
 	lc := lifecycle.New(pool, store)
 	ts := httptest.NewServer(serve.New(serve.Options{
 		Store: store, CacheTTL: 300 * time.Millisecond,
-		Upload: api, Lifecycle: lifecycle.NewAPI(lc, tokenChecker()), Auth: tokenChecker(), Ping: pool.Ping,
+		Upload: api, Lifecycle: lifecycle.NewAPI(lc, tokenChecker()), Auth: tokenChecker(), Ping: dbPing(pool),
 	}))
 	t.Cleanup(ts.Close)
 

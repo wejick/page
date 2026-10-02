@@ -10,12 +10,13 @@ ops help.
 Prerequisites:
 
 - **Go** — runs the server.
-- **Docker** — runs its two dependencies, started by `make up`:
-  MinIO (S3-compatible object storage, API on :9000, console on :9001) and
-  Postgres. The storage bucket is created automatically.
+- **Docker** — runs MinIO (S3-compatible object storage, API on :9000,
+  console on :9001), started by `make up`. The storage bucket is created
+  automatically; the write-side database is a local SQLite file
+  (`./data/page.db`), no container needed.
 
 ```bash
-make up      # MinIO + Postgres via docker compose
+make up      # MinIO via docker compose
 make run     # server on :8080 (auth token: devtoken)
 make seed    # uploads a sample Framer-style pack (no server needed)
 open http://localhost:8080/p/sample-1/
@@ -59,7 +60,7 @@ but never reuses its code — slug counters only move forward.
 | Variable | Default | Notes |
 |---|---|---|
 | `SERVER_MODE` | `all` | `serve` pages/assets only · `admin` upload UI + API only · `all` everything |
-| `DATABASE_URL` | `postgres://page:page@localhost:5432/page` | not needed in serve mode |
+| `SQLITE_PATH` | — | path of the SQLite database file; required in `admin`/`all` modes, not needed in serve mode (`make run` uses `data/page.db`) |
 | `AUTH_MODE` | `token` | admin-plane auth: `token` static bearer · `none` proxy/network-protected · `oidc` SSO login (see below) |
 | `AUTH_TOKEN` | `devtoken` | bearer token for `/api/*`; required in `token` mode, forbidden in `none`, optional in `oidc` (machine path) |
 | `OIDC_ISSUER` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` / `OIDC_REDIRECT_URL` | — | required when `AUTH_MODE=oidc`; redirect URL is `{base}/auth/callback` |
@@ -75,6 +76,47 @@ but never reuses its code — slug counters only move forward.
 
 Storage works with any S3-compatible endpoint (AWS S3, R2, B2, Spaces,
 MinIO, …), configured entirely via env.
+
+### Database and recovery (Litestream)
+
+The write side keeps pages, the asset manifest, and slug counters in one
+SQLite file (`SQLITE_PATH`) — the serve path never reads it. In production a
+[Litestream](https://litestream.io) sidecar continuously replicates the
+database's WAL into the same S3 bucket under the reserved `_db/` prefix
+(replica objects are unreachable from the public edge, which only maps
+`/p/*` and `/a/*` into the bucket):
+
+```yaml
+# litestream.yml — runs beside the admin/all instance
+dbs:
+  - path: /data/page.db
+    replicas:
+      - url: s3://pages/_db
+        endpoint: http://s3.internal:9000   # or your provider's endpoint
+        access-key-id: ...
+        secret-access-key: ...
+```
+
+Deployment rules:
+
+- **One admin writer.** SQLite is a local file: exactly one admin/all
+  instance may write it. Two processes booting against the same file are
+  safe (migrations serialize on SQLite's write lock), but two hosts must
+  never write one database — orchestration must prevent it.
+- **Boot order:** `litestream restore -if-db-not-exists -o /data/page.db
+  s3://pages/_db` before the server starts, then the server (migrations run
+  on boot), then `litestream replicate`. On a fresh host the restore
+  recovers the bookkeeping; without it the database starts empty.
+- **Recovery window:** replication is asynchronous (~1s). After a crash and
+  restore, the bucket can be a hair ahead of the database — an uploaded page
+  may serve without a manifest row, or a parked page's status may read
+  `live` while its objects sit under `_parked/`. Re-running the operation
+  converges both (uploads re-write their rows; toggles re-run their move).
+  If the admin UI and the bucket ever disagree, re-run the toggle.
+
+Moving an existing Postgres deployment: run `go run ./cmd/pgmigrate -pg
+$DATABASE_URL -sqlite /data/page.db` once against a fresh target (it refuses
+a non-empty one).
 
 ### Admin auth modes
 

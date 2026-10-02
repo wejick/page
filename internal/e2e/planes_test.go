@@ -29,17 +29,17 @@ import (
 func TestSplitPlanesServeAndAdmin(t *testing.T) {
 	ctx := context.Background()
 
-	// Postgres: the admin plane's dependency. It stays up for the whole test —
+	// SQLite: the admin plane's dependency. It stays up for the whole test —
 	// the database-terminated scenario belongs to
 	// TestServeModeBootsWithoutDatabase; here both instances coexist.
-	pool := startPostgres(t, ctx).Pool
+	pool := startDB(t)
 
 	// MinIO: the one shared bucket both instances see.
 	store, endpoint := startMinio(t, ctx)
 
 	// --- Admin instance: the admin plane exactly as runAdminAll wires it.
 	api := upload.New(upload.Options{
-		Pool: pool, Store: store,
+		DB: pool, Store: store,
 		Caps: config.Caps{
 			MaxRawBytes: 25 << 20, MaxDecompressedBytes: 100 << 20,
 			MaxFiles: 2000, MaxAssetBytes: 10 << 20,
@@ -54,7 +54,7 @@ func TestSplitPlanesServeAndAdmin(t *testing.T) {
 	lc := lifecycle.New(pool, store)
 	adminTS := httptest.NewServer(serve.New(serve.Options{
 		Mode: config.ModeAdmin, Store: store,
-		Upload: api, Lifecycle: lifecycle.NewAPI(lc, tokenChecker()), Auth: tokenChecker(), Ping: pool.Ping,
+		Upload: api, Lifecycle: lifecycle.NewAPI(lc, tokenChecker()), Auth: tokenChecker(), Ping: dbPing(pool),
 	}))
 	t.Cleanup(adminTS.Close)
 

@@ -24,12 +24,11 @@ import (
 func TestManagementEndToEnd(t *testing.T) {
 	ctx := context.Background()
 
-	pg := startPostgres(t, ctx)
-	pool := pg.Pool
+	pool := startDB(t)
 	store, _ := startMinio(t, ctx)
 
 	api := upload.New(upload.Options{
-		Pool: pool, Store: store,
+		DB: pool, Store: store,
 		Caps: config.Caps{
 			MaxRawBytes: 25 << 20, MaxDecompressedBytes: 100 << 20,
 			MaxFiles: 2000, MaxAssetBytes: 10 << 20,
@@ -41,7 +40,7 @@ func TestManagementEndToEnd(t *testing.T) {
 	lc := lifecycle.New(pool, store)
 	ts := httptest.NewServer(serve.New(serve.Options{
 		Store: store, CacheTTL: 300 * time.Millisecond,
-		Upload: api, Lifecycle: lifecycle.NewAPI(lc, tokenChecker()), Auth: tokenChecker(), Ping: pool.Ping,
+		Upload: api, Lifecycle: lifecycle.NewAPI(lc, tokenChecker()), Auth: tokenChecker(), Ping: dbPing(pool),
 	}))
 	t.Cleanup(ts.Close)
 
@@ -109,7 +108,7 @@ func TestManagementEndToEnd(t *testing.T) {
 	}
 
 	// Delete during a lifecycle transition: 409, page untouched.
-	if _, err := pool.Exec(ctx,
+	if _, err := pool.ExecContext(ctx,
 		`UPDATE pages SET status = 'parking' WHERE slug = 'mgmt-1'`); err != nil {
 		t.Fatalf("force parking: %v", err)
 	}

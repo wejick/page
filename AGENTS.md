@@ -5,9 +5,9 @@ and developers. Product overview, quick start, and base configuration:
 [README.md](README.md).
 
 Module `page`. Go, stdlib-first: `net/http` ServeMux with 1.22 pattern
-routing (no router/web framework), pgx/v5 for Postgres (write-side only, no
-ORM), minio-go behind the storage seam, testcontainers-go for integration
-tests.
+routing (no router/web framework), `database/sql` + modernc.org/sqlite for
+the write-side store (no ORM), minio-go behind the storage seam,
+testcontainers-go (MinIO) for integration tests.
 
 ## Design invariants
 
@@ -16,8 +16,8 @@ don't:
 
 - **The serve path never touches the database.** Serving is URL → storage
   key arithmetic, content types from object metadata, entry HTML cached in
-  memory and revalidated via `Stat` after the TTL. Postgres is write-side
-  bookkeeping only (slug counters, manifest, lifecycle status) — a Postgres
+  memory and revalidated via `Stat` after the TTL. The database is write-side
+  bookkeeping only (slug counters, manifest, lifecycle status) — a database
   outage can't affect page serving, and serving health never depends on it.
 - **`internal/storage` is the only code seam.** Five operations (`Put`,
   `Get`, `Stat`, `Copy`, `DeletePrefix`), deliberately frozen: no listing,
@@ -31,6 +31,15 @@ don't:
   `kept-external` in the manifest — an accepted compromise, visible via
   `GET /api/pages/{slug}`, never an upload error. Manifest statuses:
   `local`, `baked`, `kept-cdn`, `kept-external`.
+- **One file, one writer, replicated.** The database is a single SQLite
+  file (`SQLITE_PATH`, WAL mode); a Litestream sidecar streams its WAL to
+  the page bucket under the reserved `_db/` prefix. Exactly one admin writer
+  per file — same-file concurrent boots are safe (`db.Migrate` runs in one
+  `BEGIN IMMEDIATE` transaction, SQLite's write lock serializes), two hosts
+  must never write one database; failover is restore-based. Replication is
+  asynchronous (~1s): after a restore the bucket can be slightly ahead of
+  the database, and re-running the operation converges
+  (replace-postgres-with-sqlite D6).
 - **Takedown without serve-plane logic.** Parking moves objects under the
   reserved `_parked/{slug}/` prefix; serving learns through key existence,
   and the HTML cache revalidates via `Stat` after the TTL. Delete is the
@@ -39,9 +48,9 @@ don't:
   mid-operation is healed by the lifecycle `Sweep` on admin/all boot.
   Deleted slugs' codes are never reused (counters only move forward).
 - **One binary, mode-gated.** `SERVER_MODE=serve` boots from validated
-  storage config only — no pool, no migrations, no bucket create, no sweep;
-  `admin`/`all` own the boot duties. `db.Migrate` takes a Postgres advisory
-  lock so concurrent admin replicas migrate safely.
+  storage config only — no database, no migrations, no bucket create, no
+  sweep; `admin`/`all` own the boot duties (open SQLite, migrate, bucket
+  create, sweep).
 - **Auth is mode-gated and admin-plane-only.** One shared checker
   (`internal/auth`) guards `/` and `/api/*`; `/p/*`, `/a/*`, `/healthz`
   never authenticate. `AUTH_MODE` picks the mechanism — `token` (static
@@ -78,10 +87,11 @@ instance; rollback is a mode flip back to `all`.
 Before declaring done: `gofmt -l .` empty, `go vet ./...` and
 `go vet -tags=integration ./...` clean, `go test ./...` green, and — when
 the change touches runtime behavior — `go test -tags=integration ./...`
-green (real MinIO + Postgres via testcontainers).
+green (real MinIO via testcontainers; the database is a local SQLite file
+and needs no container).
 
-Testing rules: unit tests run against the `mem` driver and fixture packs on
-disk; integration tests use real containers. Mock the external asset
+Testing rules: unit tests run against the `mem` driver, SQLite temp files,
+and fixture packs on disk; integration tests use real containers. Mock the external asset
 fetcher's HTTP and nothing else — never our own interfaces. Tests are
 table-driven and live next to the code (e2e tests in `internal/e2e`).
 

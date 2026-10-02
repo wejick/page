@@ -27,7 +27,7 @@ import (
 // (The file-upload regression journey is TestUploadAndServeEndToEnd.)
 func TestImportByURLEndToEnd(t *testing.T) {
 	ctx := context.Background()
-	pg := startPostgres(t, ctx)
+	pool := startDB(t)
 	store, _ := startMinio(t, ctx)
 
 	// Source site: entry document with relative refs; the hero image's
@@ -58,7 +58,7 @@ func TestImportByURLEndToEnd(t *testing.T) {
 	t.Cleanup(site.Close)
 
 	api := upload.New(upload.Options{
-		Pool: pg.Pool, Store: store,
+		DB: pool, Store: store,
 		Caps: config.Caps{
 			MaxRawBytes: 25 << 20, MaxDecompressedBytes: 100 << 20,
 			MaxFiles: 2000, MaxAssetBytes: 10 << 20,
@@ -69,7 +69,7 @@ func TestImportByURLEndToEnd(t *testing.T) {
 		Guard: fetch.Permissive, // the source is a loopback httptest server
 	})
 	ts := httptest.NewServer(serve.New(serve.Options{
-		Store: store, Upload: api, Ping: pg.Pool.Ping,
+		Store: store, Upload: api, Ping: dbPing(pool),
 	}))
 	t.Cleanup(ts.Close)
 

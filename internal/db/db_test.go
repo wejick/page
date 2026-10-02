@@ -1,20 +1,37 @@
-//go:build integration
-
 package db
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	_ "modernc.org/sqlite"
 )
+
+// openTestDB opens a fresh migrated database file in a per-test temp dir —
+// the plain-suite stand-in for the old Postgres testcontainer.
+func openTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "page.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	if err := Migrate(ctx, db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	return db
+}
 
 // seedPages inserts pages with distinct created_at ordering: slug "p-<i>"
 // gets the i-th oldest timestamp, so "newest first" means descending i.
 // A status of "" maps to the default (live).
-func seedPages(t *testing.T, ctx context.Context, pool *pgxpool.Pool, statuses map[string]string) {
+func seedPages(t *testing.T, ctx context.Context, db *sql.DB, statuses map[string]string) {
 	t.Helper()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	for i := 0; i < 5; i++ {
@@ -24,10 +41,10 @@ func seedPages(t *testing.T, ctx context.Context, pool *pgxpool.Pool, statuses m
 		if !ok || status == "" {
 			status = "live"
 		}
-		if _, err := pool.Exec(ctx, `
+		if _, err := db.ExecContext(ctx, `
 			INSERT INTO pages (slug, identifier, code, status, created_at)
-			VALUES ($1, $2, $3, $4, $5)`,
-			slug, ident, code, status, base.Add(time.Duration(i)*time.Hour)); err != nil {
+			VALUES (?1, ?2, ?3, ?4, ?5)`,
+			slug, ident, code, status, base.Add(time.Duration(i)*time.Hour).UnixMilli()); err != nil {
 			t.Fatalf("seed %s: %v", slug, err)
 		}
 	}
@@ -35,14 +52,11 @@ func seedPages(t *testing.T, ctx context.Context, pool *pgxpool.Pool, statuses m
 
 func TestListPages(t *testing.T) {
 	ctx := context.Background()
-	pool := startPostgres(t, ctx)
-	if err := Migrate(ctx, pool); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-	seedPages(t, ctx, pool, map[string]string{"p-0": "parked", "p-1": "parked"})
+	db := openTestDB(t)
+	seedPages(t, ctx, db, map[string]string{"p-0": "parked", "p-1": "parked"})
 
 	// Ordering: newest first.
-	pages, total, err := ListPages(ctx, pool, "", 50, 0)
+	pages, total, err := ListPages(ctx, db, "", 50, 0)
 	if err != nil {
 		t.Fatalf("ListPages: %v", err)
 	}
@@ -60,7 +74,7 @@ func TestListPages(t *testing.T) {
 	}
 
 	// Window: limit/offset slices the same ordering, total stays unfiltered.
-	pages, total, err = ListPages(ctx, pool, "", 2, 2)
+	pages, total, err = ListPages(ctx, db, "", 2, 2)
 	if err != nil {
 		t.Fatalf("ListPages window: %v", err)
 	}
@@ -72,7 +86,7 @@ func TestListPages(t *testing.T) {
 	}
 
 	// Last page: offset past the remaining rows yields an empty slice, not nil.
-	pages, _, err = ListPages(ctx, pool, "", 2, 4)
+	pages, _, err = ListPages(ctx, db, "", 2, 4)
 	if err != nil {
 		t.Fatalf("ListPages tail: %v", err)
 	}
@@ -81,7 +95,7 @@ func TestListPages(t *testing.T) {
 	}
 
 	// Status filter: total counts only matching rows.
-	pages, total, err = ListPages(ctx, pool, "parked", 50, 0)
+	pages, total, err = ListPages(ctx, db, "parked", 50, 0)
 	if err != nil {
 		t.Fatalf("ListPages filter: %v", err)
 	}
@@ -95,47 +109,77 @@ func TestListPages(t *testing.T) {
 	}
 
 	// Filter with no matches: empty result, zero total.
-	pages, total, err = ListPages(ctx, pool, "deleting", 50, 0)
+	pages, total, err = ListPages(ctx, db, "deleting", 50, 0)
 	if err != nil || total != 0 || len(pages) != 0 {
 		t.Fatalf("empty filter = %v/%d/%v, want 0/0/nil", pages, total, err)
 	}
 
 	// Clamps: absurd limit clamps to the cap (still all 5 rows here), and a
 	// zero limit takes the default without error.
-	if _, total, err = ListPages(ctx, pool, "", 100000, 0); err != nil || total != 5 {
+	if _, total, err = ListPages(ctx, db, "", 100000, 0); err != nil || total != 5 {
 		t.Fatalf("clamped limit = %d/%v, want 5/nil", total, err)
 	}
-	if _, _, err = ListPages(ctx, pool, "", 0, 0); err != nil {
+	if _, _, err = ListPages(ctx, db, "", 0, 0); err != nil {
 		t.Fatalf("default limit: %v", err)
 	}
 }
 
 func TestDeletePage(t *testing.T) {
 	ctx := context.Background()
-	pool := startPostgres(t, ctx)
-	if err := Migrate(ctx, pool); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-	seedPages(t, ctx, pool, nil)
-	if _, err := pool.Exec(ctx, `
+	db := openTestDB(t)
+	seedPages(t, ctx, db, nil)
+	if _, err := db.ExecContext(ctx, `
 		INSERT INTO assets (slug, path, source_url, content_type, bytes, status)
 		VALUES ('p-2', 'style.css', 'src', 'text/css', 10, 'local')`); err != nil {
 		t.Fatalf("seed asset: %v", err)
 	}
 
-	if err := DeletePage(ctx, pool, "p-2"); err != nil {
+	if err := DeletePage(ctx, db, "p-2"); err != nil {
 		t.Fatalf("DeletePage: %v", err)
 	}
 	var pages, assets int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pages`).Scan(&pages); err != nil || pages != 4 {
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pages`).Scan(&pages); err != nil || pages != 4 {
 		t.Fatalf("pages after delete = %d/%v, want 4", pages, err)
 	}
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM assets`).Scan(&assets); err != nil || assets != 0 {
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM assets`).Scan(&assets); err != nil || assets != 0 {
 		t.Fatalf("assets after cascade = %d/%v, want 0", assets, err)
 	}
 
 	// Unknown slug is distinguishable.
-	if err := DeletePage(ctx, pool, "p-2"); err == nil {
+	if err := DeletePage(ctx, db, "p-2"); err == nil {
 		t.Fatal("deleting a missing row succeeded, want ErrNotFound")
+	}
+}
+
+func TestCreateAndGetPage(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	assets := []AssetRow{
+		{Path: "index.html", SourceURL: "", ContentType: "text/html; charset=utf-8", Bytes: 120, Status: "local"},
+		{Path: "app.js", SourceURL: "https://cdn.example/app.js", ContentType: "text/javascript", Bytes: 30, Status: "kept-cdn"},
+	}
+	rec := PageRecord{Slug: "demo-1", Identifier: "demo", Code: 1}
+	if err := CreatePage(ctx, db, rec, assets, 150); err != nil {
+		t.Fatalf("CreatePage: %v", err)
+	}
+
+	meta, got, err := GetPage(ctx, db, "demo-1")
+	if err != nil {
+		t.Fatalf("GetPage: %v", err)
+	}
+	if meta.Slug != "demo-1" || meta.Identifier != "demo" || meta.Code != 1 ||
+		meta.AssetCount != 2 || meta.TotalBytes != 150 || meta.Status != "live" {
+		t.Fatalf("meta = %+v", meta)
+	}
+	if meta.CreatedAt.IsZero() || time.Since(meta.CreatedAt) > time.Minute {
+		t.Fatalf("created_at not defaulted to now: %v", meta.CreatedAt)
+	}
+	if len(got) != 2 || got[0].Path != "app.js" || got[1].Path != "index.html" {
+		t.Fatalf("assets = %+v, want path-ordered", got)
+	}
+
+	if _, _, err := GetPage(ctx, db, "missing-9"); err != ErrNotFound {
+		t.Fatalf("GetPage missing = %v, want ErrNotFound", err)
 	}
 }

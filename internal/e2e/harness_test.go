@@ -6,14 +6,15 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"database/sql"
 	"mime/multipart"
+	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	tc "github.com/testcontainers/testcontainers-go"
 	miniomod "github.com/testcontainers/testcontainers-go/modules/minio"
-	postgres "github.com/testcontainers/testcontainers-go/modules/postgres"
+	_ "modernc.org/sqlite"
 
 	"page/internal/auth"
 	"page/internal/config"
@@ -35,39 +36,25 @@ func ensureBucket(t *testing.T, ctx context.Context, store *s3compat.Store) {
 	t.Fatalf("bucket: %v", err)
 }
 
-// testPostgres bundles the running container with its migrated pool so a
-// test can retire either mid-test (the serve-mode boot proof does exactly
-// that); everything else just lets the cleanups run.
-type testPostgres struct {
-	Container *postgres.PostgresContainer
-	Pool      *pgxpool.Pool
+// dbPing is the admin-plane health probe over a SQLite handle: a real query
+// round trip through the schema, exactly what cmd/server wires.
+func dbPing(d *sql.DB) func(context.Context) error {
+	return func(ctx context.Context) error { return db.Ping(ctx, d) }
 }
 
-// startPostgres boots a real Postgres testcontainer, opens a pool over it,
-// and applies the migrations. Pool close and container terminate are
-// registered as cleanups here.
-func startPostgres(t *testing.T, ctx context.Context) *testPostgres {
+// startDB opens a migrated SQLite file in a per-test temp dir — the admin
+// plane's database needs no container anymore.
+func startDB(t *testing.T) *sql.DB {
 	t.Helper()
-	pgc, err := postgres.Run(ctx, "postgres:17-alpine",
-		postgres.WithDatabase("page"), postgres.WithUsername("page"),
-		postgres.WithPassword("page"), postgres.BasicWaitStrategies())
+	d, err := db.Open(filepath.Join(t.TempDir(), "page.db"))
 	if err != nil {
-		t.Fatalf("postgres: %v", err)
+		t.Fatalf("open: %v", err)
 	}
-	t.Cleanup(func() { _ = pgc.Terminate(ctx) })
-	dsn, err := pgc.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		t.Fatalf("dsn: %v", err)
-	}
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("pool: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	if err := db.Migrate(ctx, pool); err != nil {
+	t.Cleanup(func() { _ = d.Close() })
+	if err := db.Migrate(context.Background(), d); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	return &testPostgres{Container: pgc, Pool: pool}
+	return d
 }
 
 // startMinio boots a real MinIO testcontainer (S3-compatible driver,

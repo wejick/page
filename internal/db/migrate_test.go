@@ -1,51 +1,56 @@
-//go:build integration
-
 package db
 
 import (
 	"context"
+	"database/sql"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-	postgres "github.com/testcontainers/testcontainers-go/modules/postgres"
+	_ "modernc.org/sqlite"
 )
 
-// Integration test: boots a real Postgres via testcontainers.
-// Run with: go test -tags=integration ./...
+// The schema applies on a fresh file and is idempotent; the constraints the
+// manifest relies on hold (unique slug, unique (identifier, code), asset
+// status CHECK, assets cascade on page delete).
 func TestMigrateAppliesSchema(t *testing.T) {
 	ctx := context.Background()
-	pool := startPostgres(t, ctx)
+	path := filepath.Join(t.TempDir(), "page.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
 
-	if err := Migrate(ctx, pool); err != nil {
+	if err := Migrate(ctx, db); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 	// Idempotent.
-	if err := Migrate(ctx, pool); err != nil {
+	if err := Migrate(ctx, db); err != nil {
 		t.Fatalf("Migrate (second run): %v", err)
 	}
 
 	// pages: duplicate slug must fail (PK).
-	if _, err := pool.Exec(ctx, `INSERT INTO pages (slug, identifier, code) VALUES ('x-1','x',1)`); err != nil {
+	if _, err := db.ExecContext(ctx, `INSERT INTO pages (slug, identifier, code) VALUES ('x-1','x',1)`); err != nil {
 		t.Fatalf("insert page: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO pages (slug, identifier, code) VALUES ('x-1','x',1)`); err == nil {
+	if _, err := db.ExecContext(ctx, `INSERT INTO pages (slug, identifier, code) VALUES ('x-1','x',1)`); err == nil {
 		t.Fatal("duplicate slug insert succeeded, want unique violation")
 	}
 
 	// pages: duplicate (identifier, code) must fail (unique index).
-	if _, err := pool.Exec(ctx, `INSERT INTO pages (slug, identifier, code) VALUES ('x-1-bis','x',1)`); err == nil {
+	if _, err := db.ExecContext(ctx, `INSERT INTO pages (slug, identifier, code) VALUES ('x-1-bis','x',1)`); err == nil {
 		t.Fatal("duplicate (identifier, code) insert succeeded, want unique violation")
 	}
 
 	// counters: exists and allocatable.
-	if _, err := pool.Exec(ctx, `INSERT INTO counters (identifier, next) VALUES ('x', 2)`); err != nil {
+	if _, err := db.ExecContext(ctx, `INSERT INTO counters (identifier, next) VALUES ('x', 2)`); err != nil {
 		t.Fatalf("insert counter: %v", err)
 	}
 	var next int
-	if err := pool.QueryRow(ctx, `SELECT next FROM counters WHERE identifier = 'x'`).Scan(&next); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT next FROM counters WHERE identifier = 'x'`).Scan(&next); err != nil {
 		t.Fatalf("select counter: %v", err)
 	}
 	if next != 2 {
@@ -53,38 +58,115 @@ func TestMigrateAppliesSchema(t *testing.T) {
 	}
 
 	// assets: status CHECK constraint holds.
-	if _, err := pool.Exec(ctx,
+	if _, err := db.ExecContext(ctx,
 		`INSERT INTO assets (slug, path, source_url, content_type, bytes, status)
 		 VALUES ('x-1', 'index.html', 'src', 'text/html', 5, 'bogus')`); err == nil {
 		t.Fatal("bogus asset status accepted, want CHECK violation")
 	}
-	if _, err := pool.Exec(ctx,
+	if _, err := db.ExecContext(ctx,
 		`INSERT INTO assets (slug, path, source_url, content_type, bytes, status)
 		 VALUES ('x-1', 'index.html', 'src', 'text/html', 5, 'local')`); err != nil {
 		t.Fatalf("insert asset: %v", err)
 	}
 
-	// assets cascade on page delete.
-	if _, err := pool.Exec(ctx, `DELETE FROM pages WHERE slug = 'x-1'`); err != nil {
+	// assets cascade on page delete (foreign_keys pragma is on by DSN).
+	if _, err := db.ExecContext(ctx, `DELETE FROM pages WHERE slug = 'x-1'`); err != nil {
 		t.Fatalf("delete page: %v", err)
 	}
 	var n int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM assets`).Scan(&n); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM assets`).Scan(&n); err != nil {
 		t.Fatalf("count assets: %v", err)
 	}
 	if n != 0 {
 		t.Fatalf("assets after cascade = %d, want 0", n)
 	}
+
+	// pages: the lifecycle CHECK holds the full vocabulary and nothing else.
+	for _, ok := range []string{"live", "parking", "parked", "unparking", "deleting"} {
+		if _, err := db.ExecContext(ctx,
+			`INSERT INTO pages (slug, identifier, code, status) VALUES (?1, ?2, 1, ?1)`, ok, ok); err != nil {
+			t.Fatalf("status %q rejected: %v", ok, err)
+		}
+	}
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO pages (slug, identifier, code, status) VALUES ('v-1', 'v', 1, 'vanished')`); err == nil {
+		t.Fatal("bogus page status accepted, want CHECK violation")
+	}
 }
 
-// Two admin replicas booting at the same time: both Migrate calls must
-// succeed and the schema must end up fully applied exactly once, with the
-// advisory lock serializing the two sessions.
+// A fresh deployment points SQLITE_PATH at a file whose directory does not
+// exist yet (README/Makefile: data/page.db); Open must create the parent.
+func TestOpenCreatesParentDirectory(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "nested", "deep", "page.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := Migrate(ctx, db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("database file not created: %v", err)
+	}
+}
+
+// Two admin instances booting against the same file — separate database
+// handles, as separate processes would hold — both migrate successfully
+// exactly once (the write lock is per-connection, so the second handle
+// exercises the real cross-handle contention).
+func TestMigrateConcurrentHandles(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "page.db")
+
+	const handles = 2
+	dbs := make([]*sql.DB, handles)
+	for i := range dbs {
+		d, err := Open(path)
+		if err != nil {
+			t.Fatalf("open %d: %v", i, err)
+		}
+		t.Cleanup(func() { _ = d.Close() })
+		dbs[i] = d
+	}
+
+	start := make(chan struct{})
+	errs := make([]error, handles)
+	var wg sync.WaitGroup
+	for i := range dbs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			errs[i] = Migrate(ctx, dbs[i])
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent Migrate on handle %d: %v", i, err)
+		}
+	}
+	assertAllMigrationsApplied(t, ctx, dbs[0])
+}
+
+// Two admin processes booting against the same file at the same time: both
+// Migrate calls must succeed and the schema must end up fully applied exactly
+// once, with SQLite's write lock serializing the two (BEGIN IMMEDIATE,
+// replace-postgres-with-sqlite D4).
 func TestMigrateConcurrentBoots(t *testing.T) {
 	ctx := context.Background()
-	pool := startPostgres(t, ctx)
+	path := filepath.Join(t.TempDir(), "page.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
 
-	// Barrier so both calls contend for the advisory lock simultaneously.
+	// Barrier so both calls contend for the write lock simultaneously.
 	start := make(chan struct{})
 	errs := make([]error, 2)
 	var wg sync.WaitGroup
@@ -93,7 +175,7 @@ func TestMigrateConcurrentBoots(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			errs[i] = Migrate(ctx, pool)
+			errs[i] = Migrate(ctx, db)
 		}()
 	}
 	close(start)
@@ -104,12 +186,12 @@ func TestMigrateConcurrentBoots(t *testing.T) {
 			t.Fatalf("concurrent Migrate %d: %v", i, err)
 		}
 	}
-	assertAllMigrationsApplied(t, ctx, pool)
+	assertAllMigrationsApplied(t, ctx, db)
 }
 
 // assertAllMigrationsApplied checks that every embedded migration is recorded
 // in schema_migrations and, on a fresh database, that there are no others.
-func assertAllMigrationsApplied(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+func assertAllMigrationsApplied(t *testing.T, ctx context.Context, db *sql.DB) {
 	t.Helper()
 	entries, err := fs.ReadDir(migrationsFS, "migrations")
 	if err != nil {
@@ -123,7 +205,7 @@ func assertAllMigrationsApplied(t *testing.T, ctx context.Context, pool *pgxpool
 	}
 
 	got := map[string]bool{}
-	rows, err := pool.Query(ctx, `SELECT version FROM schema_migrations`)
+	rows, err := db.QueryContext(ctx, `SELECT version FROM schema_migrations`)
 	if err != nil {
 		t.Fatalf("select schema_migrations: %v", err)
 	}
@@ -146,167 +228,5 @@ func assertAllMigrationsApplied(t *testing.T, ctx context.Context, pool *pgxpool
 	}
 	if len(got) != len(want) {
 		t.Errorf("schema_migrations has %d entries, want %d", len(got), len(want))
-	}
-}
-
-func startPostgres(t *testing.T, ctx context.Context) *pgxpool.Pool {
-	t.Helper()
-	pgc, err := postgres.Run(ctx, "postgres:17-alpine",
-		postgres.WithDatabase("page"),
-		postgres.WithUsername("page"),
-		postgres.WithPassword("page"),
-		postgres.BasicWaitStrategies(),
-	)
-	if err != nil {
-		t.Fatalf("start postgres container: %v", err)
-	}
-	t.Cleanup(func() { _ = pgc.Terminate(ctx) })
-
-	dsn, err := pgc.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		t.Fatalf("connection string: %v", err)
-	}
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("pool: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
-}
-
-// The 0001→0002 upgrade path: a database already at 0001 (with existing page
-// rows) must come up as live — the toggle column is additive with a default.
-func TestMigrateUpgradeFrom0001DefaultsLive(t *testing.T) {
-	ctx := context.Background()
-	pool := startPostgres(t, ctx)
-
-	// Apply only 0001 by hand and register it as applied, exactly as a
-	// pre-toggle deployment would look.
-	sqlBytes, err := os.ReadFile("migrations/0001_init.sql")
-	if err != nil {
-		t.Fatalf("read 0001: %v", err)
-	}
-	if _, err := pool.Exec(ctx, `
-		CREATE TABLE IF NOT EXISTS schema_migrations (
-			version    TEXT PRIMARY KEY,
-			applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
-		)`); err != nil {
-		t.Fatalf("schema_migrations: %v", err)
-	}
-	if _, err := pool.Exec(ctx, string(sqlBytes)); err != nil {
-		t.Fatalf("apply 0001: %v", err)
-	}
-	if _, err := pool.Exec(ctx,
-		`INSERT INTO schema_migrations (version) VALUES ('0001_init.sql')`); err != nil {
-		t.Fatalf("register 0001: %v", err)
-	}
-	if _, err := pool.Exec(ctx,
-		`INSERT INTO pages (slug, identifier, code) VALUES ('old-1','old',1)`); err != nil {
-		t.Fatalf("insert pre-toggle page: %v", err)
-	}
-
-	// Migrate must apply only 0002 and default the existing row to live.
-	if err := Migrate(ctx, pool); err != nil {
-		t.Fatalf("Migrate upgrade: %v", err)
-	}
-	var status string
-	if err := pool.QueryRow(ctx,
-		`SELECT status FROM pages WHERE slug = 'old-1'`).Scan(&status); err != nil {
-		t.Fatalf("select status: %v", err)
-	}
-	if status != "live" {
-		t.Fatalf("upgraded row status = %q, want live", status)
-	}
-
-	// New rows default to live too.
-	if _, err := pool.Exec(ctx,
-		`INSERT INTO pages (slug, identifier, code) VALUES ('new-2','new',1)`); err != nil {
-		t.Fatalf("insert post-toggle page: %v", err)
-	}
-	if err := pool.QueryRow(ctx,
-		`SELECT status FROM pages WHERE slug = 'new-2'`).Scan(&status); err != nil {
-		t.Fatalf("select new status: %v", err)
-	}
-	if status != "live" {
-		t.Fatalf("default status = %q, want live", status)
-	}
-
-	// The CHECK constraint rejects values outside the lifecycle vocabulary.
-	if _, err := pool.Exec(ctx,
-		`UPDATE pages SET status = 'vanished' WHERE slug = 'new-2'`); err == nil {
-		t.Fatal("bogus page status accepted, want CHECK violation")
-	}
-	for _, ok := range []string{"live", "parking", "parked", "unparking"} {
-		if _, err := pool.Exec(ctx,
-			`UPDATE pages SET status = $1 WHERE slug = 'new-2'`, ok); err != nil {
-			t.Fatalf("status %q rejected: %v", ok, err)
-		}
-	}
-}
-
-// The 0002→0003 upgrade path: a database already at 0002 (with rows in
-// various lifecycle states) keeps them as-is, and the vocabulary widens to
-// accept `deleting` while still rejecting everything else.
-func TestMigrateUpgradeFrom0002AcceptsDeleting(t *testing.T) {
-	ctx := context.Background()
-	pool := startPostgres(t, ctx)
-
-	// Apply 0001+0002 by hand and register them, exactly as a pre-delete
-	// deployment would look.
-	if _, err := pool.Exec(ctx, `
-		CREATE TABLE IF NOT EXISTS schema_migrations (
-			version    TEXT PRIMARY KEY,
-			applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
-		)`); err != nil {
-		t.Fatalf("schema_migrations: %v", err)
-	}
-	for _, name := range []string{"0001_init.sql", "0002_park_status.sql"} {
-		sqlBytes, err := os.ReadFile("migrations/" + name)
-		if err != nil {
-			t.Fatalf("read %s: %v", name, err)
-		}
-		if _, err := pool.Exec(ctx, string(sqlBytes)); err != nil {
-			t.Fatalf("apply %s: %v", name, err)
-		}
-		if _, err := pool.Exec(ctx,
-			`INSERT INTO schema_migrations (version) VALUES ($1)`, name); err != nil {
-			t.Fatalf("register %s: %v", name, err)
-		}
-	}
-	_, err := pool.Exec(ctx, `
-		INSERT INTO pages (slug, identifier, code, status) VALUES
-			('old-1', 'old', 1, 'live'),
-			('old-2', 'old', 2, 'parked')`)
-	if err != nil {
-		t.Fatalf("insert pre-delete pages: %v", err)
-	}
-
-	// Migrate must apply only 0003 and preserve existing statuses.
-	if err := Migrate(ctx, pool); err != nil {
-		t.Fatalf("Migrate upgrade: %v", err)
-	}
-	var live, parked string
-	if err := pool.QueryRow(ctx,
-		`SELECT status FROM pages WHERE slug = 'old-1'`).Scan(&live); err != nil {
-		t.Fatalf("select live: %v", err)
-	}
-	if err := pool.QueryRow(ctx,
-		`SELECT status FROM pages WHERE slug = 'old-2'`).Scan(&parked); err != nil {
-		t.Fatalf("select parked: %v", err)
-	}
-	if live != "live" || parked != "parked" {
-		t.Fatalf("upgraded statuses = %q/%q, want live/parked", live, parked)
-	}
-
-	// `deleting` is now legal; the CHECK still rejects the unknown.
-	for _, ok := range []string{"live", "parking", "parked", "unparking", "deleting"} {
-		if _, err := pool.Exec(ctx,
-			`UPDATE pages SET status = $1 WHERE slug = 'old-2'`, ok); err != nil {
-			t.Fatalf("status %q rejected: %v", ok, err)
-		}
-	}
-	if _, err := pool.Exec(ctx,
-		`UPDATE pages SET status = 'vanished' WHERE slug = 'old-2'`); err == nil {
-		t.Fatal("bogus page status accepted, want CHECK violation")
 	}
 }

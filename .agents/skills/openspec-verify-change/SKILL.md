@@ -74,7 +74,7 @@ available changes. Verification is meaningful once implementation is
 
 3. **Bring up the real system**
 
-   - This repo: `make up` (Docker: MinIO :9000, console :9001, Postgres),
+   - This repo: `make up` (Docker: MinIO :9000, console :9001; database is a local SQLite file),
      then start `make run` as a background task (Bash run_in_background —
      keep its task id for teardown). Server on :8080, auth token
      `devtoken`; current values per AGENTS.md. Poll `/healthz` until

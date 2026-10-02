@@ -1,2 +1,5 @@
 .opencode/*
 !.opencode/commands
+
+# Runtime data: local SQLite database (SQLITE_PATH), never committed.
+/data/

@@ -21,22 +21,5 @@ services:
       mc mb --ignore-existing local/pages;
       exit 0"
 
-  postgres:
-    image: postgres:17-alpine
-    ports:
-      - "5432:5432"
-    environment:
-      POSTGRES_USER: page
-      POSTGRES_PASSWORD: page
-      POSTGRES_DB: page
-    volumes:
-      - pg-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U page"]
-      interval: 2s
-      timeout: 2s
-      retries: 15
-
 volumes:
   minio-data:
-  pg-data:

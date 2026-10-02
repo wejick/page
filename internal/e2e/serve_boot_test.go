@@ -28,21 +28,20 @@ import (
 // TestServeModeBootsWithoutDatabase proves serve mode boots and serves with
 // no database configuration at all (deployment-modes D2, D4): a real
 // cmd/server subprocess serves a page seeded over the admin path, with the
-// Postgres container terminated and DATABASE_URL/AUTH_TOKEN stripped from
-// its environment before the serve instance starts.
+// seeding database closed and SQLITE_PATH/AUTH_TOKEN stripped from its
+// environment before the serve instance starts.
 func TestServeModeBootsWithoutDatabase(t *testing.T) {
 	ctx := context.Background()
 
-	// Real Postgres for the admin-plane seeding step only.
-	pg := startPostgres(t, ctx)
-	pool := pg.Pool
+	// SQLite file for the admin-plane seeding step only.
+	pool := startDB(t)
 
 	// Real MinIO: the shared bucket both instances see.
 	store, endpoint := startMinio(t, ctx)
 
 	// --- Seed through the admin/all path, exactly as cmd/server wires it.
 	api := upload.New(upload.Options{
-		Pool: pool, Store: store,
+		DB: pool, Store: store,
 		Caps: config.Caps{
 			MaxRawBytes: 25 << 20, MaxDecompressedBytes: 100 << 20,
 			MaxFiles: 2000, MaxAssetBytes: 10 << 20,
@@ -57,7 +56,7 @@ func TestServeModeBootsWithoutDatabase(t *testing.T) {
 	lc := lifecycle.New(pool, store)
 	ts := httptest.NewServer(serve.New(serve.Options{
 		Mode: config.ModeAll, Store: store, CacheTTL: time.Second,
-		Upload: api, Lifecycle: lifecycle.NewAPI(lc, tokenChecker()), Auth: tokenChecker(), Ping: pool.Ping,
+		Upload: api, Lifecycle: lifecycle.NewAPI(lc, tokenChecker()), Auth: tokenChecker(), Ping: dbPing(pool),
 	}))
 
 	mb, contentType := uploadBody(t, seedPack, "serveboot")
@@ -79,11 +78,11 @@ func TestServeModeBootsWithoutDatabase(t *testing.T) {
 		t.Fatalf("slug missing: %s", body)
 	}
 
-	// --- The admin plane is done: retire Postgres entirely. From here on
-	// any database touch, by boot or by health, must fail the test.
-	pool.Close()
-	if err := pg.Container.Terminate(ctx); err != nil {
-		t.Fatalf("terminate postgres: %v", err)
+	// --- The admin plane is done: close the database. The serve instance
+	// gets no SQLITE_PATH at all, so any database touch, by boot or by
+	// health, must fail the test.
+	if err := pool.Close(); err != nil {
+		t.Fatalf("close seeding db: %v", err)
 	}
 
 	// --- Boot the real cmd/server binary in serve mode.
@@ -102,11 +101,11 @@ func TestServeModeBootsWithoutDatabase(t *testing.T) {
 	lis.Close()
 	base := "http://127.0.0.1:" + strconv.Itoa(port)
 
-	// Strip DATABASE_URL/AUTH_TOKEN from the inherited environment: serve
+	// Strip SQLITE_PATH/AUTH_TOKEN from the inherited environment: serve
 	// mode must have no database configuration, not merely ignore it.
 	var serveEnv []string
 	for _, kv := range os.Environ() {
-		if strings.HasPrefix(kv, "DATABASE_URL=") || strings.HasPrefix(kv, "AUTH_TOKEN=") {
+		if strings.HasPrefix(kv, "SQLITE_PATH=") || strings.HasPrefix(kv, "AUTH_TOKEN=") {
 			continue
 		}
 		serveEnv = append(serveEnv, kv)
@@ -135,8 +134,8 @@ func TestServeModeBootsWithoutDatabase(t *testing.T) {
 		_, _ = cmd.Process.Wait()
 	})
 
-	// Startup succeeding at all is the first assertion: a boot-time pool
-	// open would crash against the terminated Postgres.
+	// Startup succeeding at all is the first assertion: a boot-time database
+	// open would crash against the missing SQLITE_PATH.
 	deadline := time.Now().Add(30 * time.Second)
 	healthy := false
 	for !healthy && time.Now().Before(deadline) {
@@ -213,7 +212,7 @@ func TestServeModeBootsWithoutDatabase(t *testing.T) {
 		}
 	}
 
-	// Health is storage-only: still 200 with Postgres terminated.
+	// Health is storage-only: still 200 with no database configured.
 	r, _ := get("/healthz")
 	if r.StatusCode != http.StatusOK {
 		t.Errorf("healthz = %d, want 200", r.StatusCode)

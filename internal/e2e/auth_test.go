@@ -47,13 +47,13 @@ func testKeep() ingest.KeepRules {
 	}
 }
 
-// oidcStack boots the full service (real Postgres + MinIO) in oidc mode
+// oidcStack boots the full service (real MinIO + a SQLite file) in oidc mode
 // against the fake IdP. The app's listener is reserved before the flow is
 // constructed, so the configured redirect URL is the real callback address
 // and the browser-style client needs no host rewriting.
 func oidcStack(t *testing.T, ctx context.Context) string {
 	t.Helper()
-	pg := startPostgres(t, ctx)
+	pool := startDB(t)
 	store, _ := startMinio(t, ctx)
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
@@ -74,14 +74,14 @@ func oidcStack(t *testing.T, ctx context.Context) string {
 	}
 	checker := auth.NewChecker(config.AuthModeOIDC, machineToken, flow)
 	api := upload.New(upload.Options{
-		Pool: pg.Pool, Store: store,
+		DB: pool, Store: store,
 		Caps: testCaps(), Keep: testKeep(),
 		Auth: checker,
 	})
-	lc := lifecycle.New(pg.Pool, store)
+	lc := lifecycle.New(pool, store)
 	handler := serve.New(serve.Options{
 		Store: store, Upload: api,
-		Lifecycle: lifecycle.NewAPI(lc, checker), Auth: checker, Ping: pg.Pool.Ping,
+		Lifecycle: lifecycle.NewAPI(lc, checker), Auth: checker, Ping: dbPing(pool),
 	})
 	srv := &http.Server{Handler: handler}
 	go func() { _ = srv.Serve(lis) }()
@@ -215,16 +215,16 @@ func TestOIDCAuthEndToEnd(t *testing.T) {
 // anywhere, the API and the UI simply work (auth-modes D1).
 func TestNoneModeEndToEnd(t *testing.T) {
 	ctx := context.Background()
-	pg := startPostgres(t, ctx)
+	pool := startDB(t)
 	store, _ := startMinio(t, ctx)
 	checker := auth.NewChecker(config.AuthModeNone, "", nil)
 	api := upload.New(upload.Options{
-		Pool: pg.Pool, Store: store, Caps: testCaps(), Keep: testKeep(), Auth: checker,
+		DB: pool, Store: store, Caps: testCaps(), Keep: testKeep(), Auth: checker,
 	})
-	lc := lifecycle.New(pg.Pool, store)
+	lc := lifecycle.New(pool, store)
 	ts := newTestServer(t, serve.New(serve.Options{
 		Store: store, Upload: api,
-		Lifecycle: lifecycle.NewAPI(lc, checker), Auth: checker, Ping: pg.Pool.Ping,
+		Lifecycle: lifecycle.NewAPI(lc, checker), Auth: checker, Ping: dbPing(pool),
 	}))
 	defer ts.Close()
 
@@ -270,7 +270,7 @@ func bootEnv(dsn, endpoint string, extra ...string) []string {
 	env := []string{}
 	for _, kv := range os.Environ() {
 		switch {
-		case strings.HasPrefix(kv, "DATABASE_URL="), strings.HasPrefix(kv, "AUTH_TOKEN="),
+		case strings.HasPrefix(kv, "SQLITE_PATH="), strings.HasPrefix(kv, "AUTH_TOKEN="),
 			strings.HasPrefix(kv, "AUTH_MODE="), strings.HasPrefix(kv, "SESSION_SECRET="),
 			strings.HasPrefix(kv, "OIDC_"):
 			continue
@@ -285,7 +285,7 @@ func bootEnv(dsn, endpoint string, extra ...string) []string {
 		"S3_ACCESS_KEY=minioadmin",
 		"S3_SECRET_KEY=minioadmin",
 		"S3_PATH_STYLE=true",
-		"DATABASE_URL=" + dsn,
+		"SQLITE_PATH=" + dsn,
 	}, extra...)...)
 }
 
@@ -336,12 +336,8 @@ func startServer(t *testing.T, bin string, env []string) (string, *exec.Cmd, *by
 // serves the login flow.
 func TestOIDCBootJourney(t *testing.T) {
 	ctx := context.Background()
-	pg := startPostgres(t, ctx)
 	_, endpoint := startMinio(t, ctx)
-	dsn, err := pg.Container.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		t.Fatalf("dsn: %v", err)
-	}
+	dsn := filepath.Join(t.TempDir(), "page.db") // opened by the subprocess
 	bin := buildServer(t, ctx)
 	oidcVars := []string{
 		"AUTH_MODE=oidc",
@@ -410,12 +406,8 @@ func TestOIDCBootJourney(t *testing.T) {
 // credentials and says so loudly (auth-modes D1, none mode accept rule).
 func TestNoneModeBootWarns(t *testing.T) {
 	ctx := context.Background()
-	pg := startPostgres(t, ctx)
 	_, endpoint := startMinio(t, ctx)
-	dsn, err := pg.Container.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		t.Fatalf("dsn: %v", err)
-	}
+	dsn := filepath.Join(t.TempDir(), "page.db") // opened by the subprocess
 	bin := buildServer(t, ctx)
 	base, _, output := startServer(t, bin, bootEnv(dsn, endpoint, "AUTH_MODE=none"))
 	if !waitHealthy(t, base) {
@@ -435,11 +427,7 @@ func TestNoneModeBootWarns(t *testing.T) {
 // Authorization header is sent, and the upload still lands (auth-modes D9).
 func TestSeedWithoutToken(t *testing.T) {
 	ctx := context.Background()
-	pg := startPostgres(t, ctx)
-	dsn, err := pg.Container.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		t.Fatalf("dsn: %v", err)
-	}
+	dsn := filepath.Join(t.TempDir(), "page.db") // opened by the seed process
 	bin := filepath.Join(t.TempDir(), "seed")
 	build := exec.CommandContext(ctx, "go", "build", "-o", bin, "./cmd/seed")
 	build.Dir = "../.."
@@ -448,14 +436,14 @@ func TestSeedWithoutToken(t *testing.T) {
 	}
 	env := []string{}
 	for _, kv := range os.Environ() {
-		if strings.HasPrefix(kv, "DATABASE_URL=") || strings.HasPrefix(kv, "AUTH_TOKEN=") ||
+		if strings.HasPrefix(kv, "SQLITE_PATH=") || strings.HasPrefix(kv, "AUTH_TOKEN=") ||
 			strings.HasPrefix(kv, "AUTH_MODE=") {
 			continue
 		}
 		env = append(env, kv)
 	}
 	cmd := exec.Command(bin)
-	cmd.Env = append(env, "DATABASE_URL="+dsn, "STORAGE_DRIVER=mem", "AUTH_MODE=none")
+	cmd.Env = append(env, "SQLITE_PATH="+dsn, "STORAGE_DRIVER=mem", "AUTH_MODE=none")
 	out, err := cmd.CombinedOutput()
 	if err != nil || !strings.Contains(string(out), "HTTP 201") {
 		t.Fatalf("seed = err %v, output:\n%s", err, out)

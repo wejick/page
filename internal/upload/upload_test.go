@@ -1,19 +1,18 @@
-//go:build integration
-
 package upload
 
 import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"database/sql"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-	postgres "github.com/testcontainers/testcontainers-go/modules/postgres"
+	_ "modernc.org/sqlite"
 
 	"page/internal/auth"
 	"page/internal/config"
@@ -23,33 +22,23 @@ import (
 	"page/internal/storage/mem"
 )
 
-func newTestHandler(t *testing.T, ctx context.Context, rawCap int64, guard fetch.GuardFunc) (*Handler, *mem.Store, *pgxpool.Pool) {
+func newTestHandler(t *testing.T, ctx context.Context, rawCap int64, guard fetch.GuardFunc) (*Handler, *mem.Store, *sql.DB) {
 	t.Helper()
-	pgc, err := postgres.Run(ctx, "postgres:17-alpine",
-		postgres.WithDatabase("page"), postgres.WithUsername("page"),
-		postgres.WithPassword("page"), postgres.BasicWaitStrategies())
+	d, err := db.Open(filepath.Join(t.TempDir(), "page.db"))
 	if err != nil {
-		t.Fatalf("start postgres: %v", err)
+		t.Fatalf("open: %v", err)
 	}
-	t.Cleanup(func() { _ = pgc.Terminate(ctx) })
-	dsn, err := pgc.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		t.Fatalf("dsn: %v", err)
-	}
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("pool: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	if err := db.Migrate(ctx, pool); err != nil {
+	t.Cleanup(func() { _ = d.Close() })
+	if err := db.Migrate(ctx, d); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
+	pool := d
 	if rawCap <= 0 {
 		rawCap = 25 << 20
 	}
 	store := mem.New()
 	h := New(Options{
-		Pool:  pool,
+		DB:    pool,
 		Store: store,
 		Caps: config.Caps{
 			MaxRawBytes: rawCap, MaxDecompressedBytes: 1 << 20,
@@ -298,7 +287,7 @@ func TestListEndpoint(t *testing.T) {
 		}
 	}
 	// Park alpha-1 out-of-band to give the filter something to find.
-	if _, err := pool.Exec(ctx,
+	if _, err := pool.ExecContext(ctx,
 		`UPDATE pages SET status = 'parked' WHERE slug = 'alpha-1'`); err != nil {
 		t.Fatalf("force parked: %v", err)
 	}

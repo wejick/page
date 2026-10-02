@@ -1,13 +1,13 @@
 .PHONY: up down run seed test test-integration tidy
 
-# Infra for local development (MinIO + Postgres).
+# Infra for local development (MinIO; the database is a local SQLite file).
 up:
 	docker compose up -d --wait
 
 down:
 	docker compose down -v
 
-DEV_ENV = DATABASE_URL=postgres://page:page@localhost:5432/page \
+DEV_ENV = SQLITE_PATH=data/page.db \
 	AUTH_TOKEN=devtoken \
 	S3_ENDPOINT=localhost:9000 \
 	S3_ACCESS_KEY=minioadmin \
@@ -24,12 +24,12 @@ seed:
 test:
 	go test ./...
 
-# Integration tests boot real MinIO + Postgres via testcontainers (needs Docker).
+# Integration tests boot real MinIO via testcontainers (needs Docker).
 test-integration:
 	go test -tags=integration ./...
 
-migrate:
-	$(DEV_ENV) go run ./cmd/seed # migrations run on boot; seed re-runs them
+pgmigrate:
+	$(DEV_ENV) go run ./cmd/pgmigrate # one-time Postgres → SQLite row move
 
 tidy:
 	go mod tidy

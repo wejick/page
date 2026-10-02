@@ -113,7 +113,7 @@ func TestAuthModeRouting(t *testing.T) {
 		// A router wired without a checker must reject API traffic, not
 		// open it (auth-modes D1).
 		o := Options{Store: seededStore(t, seed),
-			Upload:    upload.New(upload.Options{Pool: nil, Store: seededStore(t, seed)}),
+			Upload:    upload.New(upload.Options{DB: nil, Store: seededStore(t, seed)}),
 			Lifecycle: lifecycle.NewAPI(lifecycle.New(nil, nil), nil)}
 		ts := httptest.NewServer(New(o))
 		t.Cleanup(ts.Close)

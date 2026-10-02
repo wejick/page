@@ -2,22 +2,20 @@
 // hiding a page moves its objects from {slug}/ to the reserved
 // _parked/{slug}/ prefix and back, and deleting removes both prefixes and the
 // row — so the serve plane keeps doing URL→key arithmetic and learns the
-// state purely from key existence. The bucket is the toggle state; Postgres
-// records intent (live/parking/parked/unparking/deleting) so a crash mid-move
-// is healed by idempotent retry or the boot sweep. The serve plane never
-// queries any of this.
+// state purely from key existence. The bucket is the toggle state; the
+// database records intent (live/parking/parked/unparking/deleting) so a crash
+// mid-move is healed by idempotent retry or the boot sweep. The serve plane
+// never queries any of this.
 package lifecycle
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
-
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"page/internal/db"
 	"page/internal/storage"
@@ -46,7 +44,7 @@ var (
 
 // Service parks and unparks pages.
 type Service struct {
-	pool  *pgxpool.Pool
+	db    *sql.DB
 	store storage.Storage
 
 	mu    sync.Mutex
@@ -54,8 +52,13 @@ type Service struct {
 }
 
 // New builds the lifecycle service.
-func New(pool *pgxpool.Pool, store storage.Storage) *Service {
-	return &Service{pool: pool, store: store, locks: make(map[string]*sync.Mutex)}
+func New(db *sql.DB, store storage.Storage) *Service {
+	return &Service{db: db, store: store, locks: make(map[string]*sync.Mutex)}
+}
+
+// placeholders returns n comma-separated ? markers for an IN list.
+func placeholders(n int) string {
+	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
 }
 
 // lockFor serializes toggles of one slug so a same-direction re-invoke
@@ -100,13 +103,20 @@ func (s *Service) toggle(ctx context.Context, slug, intent, done string, prev []
 
 	// Guarded transition: only from a legal previous state, so concurrent
 	// opposite toggles serialize instead of racing.
-	tag, err := s.pool.Exec(ctx,
-		`UPDATE pages SET status = $1 WHERE slug = $2 AND status = ANY($3)`,
-		intent, slug, prev)
+	args := make([]any, 0, 2+len(prev))
+	args = append(args, intent, slug)
+	for _, p := range prev {
+		args = append(args, p)
+	}
+	tag, err := s.db.ExecContext(ctx,
+		`UPDATE pages SET status = ? WHERE slug = ? AND status IN (`+placeholders(len(prev))+`)`,
+		args...)
 	if err != nil {
 		return "", fmt.Errorf("lifecycle: transition %s: %w", intent, err)
 	}
-	if tag.RowsAffected() == 0 {
+	if n, err := tag.RowsAffected(); err != nil {
+		return "", fmt.Errorf("lifecycle: transition %s rows: %w", intent, err)
+	} else if n == 0 {
 		// Not in a legal start state: find out why.
 		cur, err := s.status(ctx, slug)
 		if err != nil {
@@ -151,13 +161,17 @@ func (s *Service) move(ctx context.Context, slug, intent string) error {
 }
 
 func (s *Service) finalize(ctx context.Context, slug, intent, done string) error {
-	tag, err := s.pool.Exec(ctx,
-		`UPDATE pages SET status = $1 WHERE slug = $2 AND status = $3`,
+	tag, err := s.db.ExecContext(ctx,
+		`UPDATE pages SET status = ? WHERE slug = ? AND status = ?`,
 		done, slug, intent)
 	if err != nil {
 		return fmt.Errorf("lifecycle: finalize %s: %w", done, err)
 	}
-	if tag.RowsAffected() != 1 {
+	n, err := tag.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("lifecycle: finalize %s rows: %w", done, err)
+	}
+	if n != 1 {
 		// Only same-direction transitions touch these states, so this is
 		// unreachable in practice; fail loudly rather than lie.
 		return fmt.Errorf("lifecycle: finalize %s: status moved concurrently", slug)
@@ -181,13 +195,17 @@ func (s *Service) Delete(ctx context.Context, slug string) error {
 	unlock.Lock()
 	defer unlock.Unlock()
 
-	tag, err := s.pool.Exec(ctx,
-		`UPDATE pages SET status = $1 WHERE slug = $2 AND status = ANY($3)`,
-		StatusDeleting, slug, []string{StatusLive, StatusParked, StatusDeleting})
+	tag, err := s.db.ExecContext(ctx,
+		`UPDATE pages SET status = ? WHERE slug = ? AND status IN (?, ?, ?)`,
+		StatusDeleting, slug, StatusLive, StatusParked, StatusDeleting)
 	if err != nil {
 		return fmt.Errorf("lifecycle: transition deleting: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
+	n, err := tag.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("lifecycle: transition deleting rows: %w", err)
+	}
+	if n == 0 {
 		// Not in a legal start state: find out why.
 		cur, err := s.status(ctx, slug)
 		if err != nil {
@@ -210,7 +228,7 @@ func (s *Service) finishDelete(ctx context.Context, slug string) error {
 	if err := s.store.DeletePrefix(ctx, ParkedPrefix+slug+"/"); err != nil {
 		return fmt.Errorf("lifecycle: delete %s%s/: %w", ParkedPrefix, slug, err)
 	}
-	if err := db.DeletePage(ctx, s.pool, slug); err != nil {
+	if err := db.DeletePage(ctx, s.db, slug); err != nil {
 		return fmt.Errorf("lifecycle: remove row: %w", err)
 	}
 	return nil
@@ -220,8 +238,8 @@ func (s *Service) finishDelete(ctx context.Context, slug string) error {
 // parked in parking/unparking re-run their (idempotent) move and finalize;
 // rows in deleting re-run the (idempotent) prefix and row removal.
 func (s *Service) Sweep(ctx context.Context) error {
-	rows, err := s.pool.Query(ctx,
-		`SELECT slug, status FROM pages WHERE status = ANY('{parking,unparking,deleting}')`)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT slug, status FROM pages WHERE status IN ('parking', 'unparking', 'deleting')`)
 	if err != nil {
 		return fmt.Errorf("lifecycle: sweep query: %w", err)
 	}
@@ -277,9 +295,9 @@ func (s *Service) Sweep(ctx context.Context) error {
 
 func (s *Service) status(ctx context.Context, slug string) (string, error) {
 	var status string
-	err := s.pool.QueryRow(ctx,
-		`SELECT status FROM pages WHERE slug = $1`, slug).Scan(&status)
-	if errors.Is(err, pgx.ErrNoRows) {
+	err := s.db.QueryRowContext(ctx,
+		`SELECT status FROM pages WHERE slug = ?`, slug).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrNotFound
 	}
 	if err != nil {

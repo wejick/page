@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	_ "modernc.org/sqlite"
 
 	"page/internal/auth"
 	"page/internal/config"
@@ -53,7 +53,7 @@ func run() error {
 
 // runServe boots the serving plane straight from the validated storage
 // config. The serve path never references a database (deployment-modes D2),
-// so its health probes storage instead of Postgres (deployment-modes D4).
+// so its health probes storage instead of the database (deployment-modes D4).
 func runServe(ctx context.Context, cfg config.Config) error {
 	store, err := openStorage(cfg.Storage)
 	if err != nil {
@@ -65,16 +65,17 @@ func runServe(ctx context.Context, cfg config.Config) error {
 }
 
 // runAdminAll boots the admin/all planes with the database-backed duties:
-// pool, migrations, bucket creation, the lifecycle sweep, and the
-// upload/lifecycle handlers. Health stays the Postgres ping
-// (deployment-modes D4).
+// open the SQLite file (the Litestream sidecar replicates it; restore-if-
+// absent is a pre-boot step owned by the sidecar), migrations, bucket
+// creation, the lifecycle sweep, and the upload/lifecycle handlers. Health
+// stays the database ping (deployment-modes D4).
 func runAdminAll(ctx context.Context, cfg config.Config) error {
-	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	pool, err := db.Open(cfg.SQLitePath)
 	if err != nil {
 		return err
 	}
 	defer pool.Close()
-	if err := pool.Ping(ctx); err != nil {
+	if err := pool.PingContext(ctx); err != nil {
 		return err
 	}
 	if err := db.Migrate(ctx, pool); err != nil {
@@ -115,7 +116,7 @@ func runAdminAll(ctx context.Context, cfg config.Config) error {
 	}
 
 	api := upload.New(upload.Options{
-		Pool:  pool,
+		DB:    pool,
 		Store: store,
 		Caps:  cfg.Caps,
 		Keep: ingest.KeepRules{
@@ -129,7 +130,7 @@ func runAdminAll(ctx context.Context, cfg config.Config) error {
 	opts.Upload = api
 	opts.Lifecycle = lifecycle.NewAPI(lc, checker)
 	opts.Auth = checker
-	opts.Ping = pool.Ping
+	opts.Ping = func(ctx context.Context) error { return db.Ping(ctx, pool) }
 	return listen(ctx, cfg, opts)
 }
 

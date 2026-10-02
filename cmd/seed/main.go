@@ -12,8 +12,6 @@ import (
 	"net/http/httptest"
 	"os"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"page/internal/auth"
 	"page/internal/config"
 	"page/internal/db"
@@ -39,12 +37,12 @@ func run() error {
 	}
 	ctx := context.Background()
 
-	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	d, err := db.Open(cfg.SQLitePath)
 	if err != nil {
 		return err
 	}
-	defer pool.Close()
-	if err := db.Migrate(ctx, pool); err != nil {
+	defer d.Close()
+	if err := db.Migrate(ctx, d); err != nil {
 		return err
 	}
 
@@ -67,7 +65,7 @@ func run() error {
 	// without the OIDC flow — seed authenticates through the machine path.
 	checker := auth.NewChecker(cfg.AuthMode, cfg.AuthToken, nil)
 	api := upload.New(upload.Options{
-		Pool:  pool,
+		DB:    d,
 		Store: store,
 		Caps:  cfg.Caps,
 		Keep: ingest.KeepRules{
@@ -76,7 +74,7 @@ func run() error {
 		},
 		Auth: checker,
 	})
-	ts := httptest.NewServer(serve.New(serve.Options{Store: store, Upload: api, Auth: checker, Ping: pool.Ping}))
+	ts := httptest.NewServer(serve.New(serve.Options{Store: store, Upload: api, Auth: checker, Ping: func(ctx context.Context) error { return db.Ping(ctx, d) }}))
 	defer ts.Close()
 
 	// Build the sample pack in memory: a Framer-style export with local

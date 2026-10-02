@@ -1,32 +1,28 @@
-//go:build integration
-
 package lifecycle
 
 import (
 	"context"
+	"database/sql"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-	tc "github.com/testcontainers/testcontainers-go"
-	miniomod "github.com/testcontainers/testcontainers-go/modules/minio"
-	postgres "github.com/testcontainers/testcontainers-go/modules/postgres"
+	_ "modernc.org/sqlite"
 
 	"page/internal/auth"
 	"page/internal/config"
 	"page/internal/db"
 	"page/internal/storage"
-	"page/internal/storage/s3compat"
+	"page/internal/storage/mem"
 )
 
-// Integration tests: real Postgres + MinIO via testcontainers.
-// Run with: go test -tags=integration ./internal/lifecycle/
-
+// The lifecycle state machine runs against a SQLite temp file and the mem
+// storage driver: nothing here depends on driver specifics (Copy semantics
+// are conformance-tested per driver in the storage packages).
 type harness struct {
-	pool  *pgxpool.Pool
+	db    *sql.DB
 	store storage.Storage
 	svc   *Service
 	api   *API
@@ -36,70 +32,25 @@ func start(t *testing.T) *harness {
 	t.Helper()
 	ctx := context.Background()
 
-	pgc, err := postgres.Run(ctx, "postgres:17-alpine",
-		postgres.WithDatabase("page"), postgres.WithUsername("page"),
-		postgres.WithPassword("page"), postgres.BasicWaitStrategies())
+	d, err := db.Open(filepath.Join(t.TempDir(), "page.db"))
 	if err != nil {
-		t.Fatalf("postgres: %v", err)
+		t.Fatalf("open: %v", err)
 	}
-	t.Cleanup(func() { _ = pgc.Terminate(ctx) })
-	dsn, err := pgc.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		t.Fatalf("dsn: %v", err)
-	}
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("pool: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	if err := db.Migrate(ctx, pool); err != nil {
+	t.Cleanup(func() { _ = d.Close() })
+	if err := db.Migrate(ctx, d); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 
-	mc, err := miniomod.Run(ctx, "quay.io/minio/minio:latest",
-		tc.WithEnv(map[string]string{
-			"MINIO_ROOT_USER": "minioadmin", "MINIO_ROOT_PASSWORD": "minioadmin",
-		}))
-	if err != nil {
-		t.Fatalf("minio: %v", err)
-	}
-	t.Cleanup(func() { _ = mc.Terminate(ctx) })
-	endpoint, err := mc.ConnectionString(ctx)
-	if err != nil {
-		t.Fatalf("minio endpoint: %v", err)
-	}
-	store, err := s3compat.New(config.Storage{
-		Driver: "s3compat", Endpoint: endpoint, Bucket: "pages",
-		AccessKey: "minioadmin", SecretKey: "minioadmin", PathStyle: true,
-	})
-	if err != nil {
-		t.Fatalf("s3compat: %v", err)
-	}
-	ensureBucket(t, ctx, store)
-
-	svc := New(pool, store)
-	return &harness{pool: pool, store: store, svc: svc, api: NewAPI(svc, auth.NewChecker(config.AuthModeToken, "secret", nil))}
-}
-
-// ensureBucket retries bucket creation: MinIO's health endpoint can answer
-// before the S3 API is fully initialized ("Server not initialized yet").
-func ensureBucket(t *testing.T, ctx context.Context, store *s3compat.Store) {
-	t.Helper()
-	var err error
-	for i := 0; i < 20; i++ {
-		if err = store.EnsureBucket(ctx); err == nil {
-			return
-		}
-		time.Sleep(250 * time.Millisecond)
-	}
-	t.Fatalf("bucket: %v", err)
+	store := mem.New()
+	svc := New(d, store)
+	return &harness{db: d, store: store, svc: svc, api: NewAPI(svc, auth.NewChecker(config.AuthModeToken, "secret", nil))}
 }
 
 // seedPage inserts a page row (status live) and two objects.
 func (h *harness) seedPage(t *testing.T, ctx context.Context, slug string) {
 	t.Helper()
-	if _, err := h.pool.Exec(ctx,
-		`INSERT INTO pages (slug, identifier, code) VALUES ($1, $2, 1)`, slug, slug); err != nil {
+	if _, err := h.db.ExecContext(ctx,
+		`INSERT INTO pages (slug, identifier, code) VALUES (?, ?, 1)`, slug, slug); err != nil {
 		t.Fatalf("seed page row: %v", err)
 	}
 	if err := h.store.Put(ctx, slug+"/index.html", "text/html; charset=utf-8",
@@ -123,8 +74,8 @@ func (h *harness) mustExist(t *testing.T, ctx context.Context, key string, want 
 func (h *harness) mustStatus(t *testing.T, ctx context.Context, slug, want string) {
 	t.Helper()
 	var status string
-	if err := h.pool.QueryRow(ctx,
-		`SELECT status FROM pages WHERE slug = $1`, slug).Scan(&status); err != nil {
+	if err := h.db.QueryRowContext(ctx,
+		`SELECT status FROM pages WHERE slug = ?`, slug).Scan(&status); err != nil {
 		t.Fatalf("select status: %v", err)
 	}
 	if status != want {
@@ -205,7 +156,7 @@ func TestOppositeToggleIsBusy(t *testing.T) {
 	h.seedPage(t, ctx, "busy-1")
 
 	// Simulate a concurrent unpark holding the transition state.
-	if _, err := h.pool.Exec(ctx,
+	if _, err := h.db.ExecContext(ctx,
 		`UPDATE pages SET status = 'unparking' WHERE slug = 'busy-1'`); err != nil {
 		t.Fatalf("force status: %v", err)
 	}
@@ -221,7 +172,7 @@ func TestResumeInterruptedPark(t *testing.T) {
 
 	// Simulate a crash mid-park: intent recorded, objects split — the parked
 	// copy exists but the live prefix was never deleted.
-	if _, err := h.pool.Exec(ctx,
+	if _, err := h.db.ExecContext(ctx,
 		`UPDATE pages SET status = 'parking' WHERE slug = 'crash-1'`); err != nil {
 		t.Fatalf("force status: %v", err)
 	}
@@ -248,11 +199,11 @@ func TestSweepResumesInterruptedToggles(t *testing.T) {
 	if _, err := h.svc.Park(ctx, "sw-unpark-1"); err != nil {
 		t.Fatalf("park: %v", err)
 	}
-	if _, err := h.pool.Exec(ctx,
+	if _, err := h.db.ExecContext(ctx,
 		`UPDATE pages SET status = 'parking' WHERE slug = 'sw-park-1'`); err != nil {
 		t.Fatalf("force parking: %v", err)
 	}
-	if _, err := h.pool.Exec(ctx,
+	if _, err := h.db.ExecContext(ctx,
 		`UPDATE pages SET status = 'unparking' WHERE slug = 'sw-unpark-1'`); err != nil {
 		t.Fatalf("force unparking: %v", err)
 	}
@@ -340,7 +291,7 @@ func TestAPIOutcomes(t *testing.T) {
 	h.mustStatus(t, ctx, "api-1", StatusLive)
 
 	// Delete during a lifecycle transition: 409, page untouched.
-	if _, err := h.pool.Exec(ctx,
+	if _, err := h.db.ExecContext(ctx,
 		`UPDATE pages SET status = 'parking' WHERE slug = 'api-1'`); err != nil {
 		t.Fatalf("force parking: %v", err)
 	}
@@ -363,7 +314,7 @@ func TestAPIOutcomes(t *testing.T) {
 	resp.Body.Close()
 	h.mustExist(t, ctx, "_parked/api-1/index.html", false)
 	var rows int
-	if err := h.pool.QueryRow(ctx,
+	if err := h.db.QueryRowContext(ctx,
 		`SELECT count(*) FROM pages WHERE slug = 'api-1'`).Scan(&rows); err != nil || rows != 0 {
 		t.Fatalf("rows after delete = %d/%v, want 0", rows, err)
 	}
@@ -382,7 +333,7 @@ func TestDeleteLivePage(t *testing.T) {
 	ctx := context.Background()
 	h := start(t)
 	h.seedPage(t, ctx, "del-1")
-	if _, err := h.pool.Exec(ctx,
+	if _, err := h.db.ExecContext(ctx,
 		`INSERT INTO counters (identifier, next) VALUES ('del-1', 2)`); err != nil {
 		t.Fatalf("seed counter: %v", err)
 	}
@@ -395,18 +346,18 @@ func TestDeleteLivePage(t *testing.T) {
 	h.mustExist(t, ctx, "_parked/del-1/index.html", false)
 
 	var rows int
-	if err := h.pool.QueryRow(ctx,
+	if err := h.db.QueryRowContext(ctx,
 		`SELECT count(*) FROM pages WHERE slug = 'del-1'`).Scan(&rows); err != nil || rows != 0 {
 		t.Fatalf("page rows after delete = %d/%v, want 0", rows, err)
 	}
 	var assets int
-	if err := h.pool.QueryRow(ctx,
+	if err := h.db.QueryRowContext(ctx,
 		`SELECT count(*) FROM assets WHERE slug = 'del-1'`).Scan(&assets); err != nil || assets != 0 {
 		t.Fatalf("asset rows after delete = %d/%v, want 0", assets, err)
 	}
 	// Delete is slug-neutral like park: counters are untouched.
 	var next int
-	if err := h.pool.QueryRow(ctx,
+	if err := h.db.QueryRowContext(ctx,
 		`SELECT next FROM counters WHERE identifier = 'del-1'`).Scan(&next); err != nil || next != 2 {
 		t.Fatalf("counter after delete = %d/%v, want 2", next, err)
 	}
@@ -435,7 +386,7 @@ func TestDeleteParkedPage(t *testing.T) {
 	h.mustExist(t, ctx, "delp-1/assets/hero.png", false)
 
 	var rows int
-	if err := h.pool.QueryRow(ctx,
+	if err := h.db.QueryRowContext(ctx,
 		`SELECT count(*) FROM pages WHERE slug = 'delp-1'`).Scan(&rows); err != nil || rows != 0 {
 		t.Fatalf("page rows after delete = %d/%v, want 0", rows, err)
 	}
@@ -451,7 +402,7 @@ func TestDeleteUnknownSlugAndBusy(t *testing.T) {
 
 	// Simulate an in-flight park: delete must refuse and leave everything.
 	h.seedPage(t, ctx, "busy-2")
-	if _, err := h.pool.Exec(ctx,
+	if _, err := h.db.ExecContext(ctx,
 		`UPDATE pages SET status = 'parking' WHERE slug = 'busy-2'`); err != nil {
 		t.Fatalf("force status: %v", err)
 	}
@@ -468,7 +419,7 @@ func TestDeleteResumesMidFlight(t *testing.T) {
 	h.seedPage(t, ctx, "crash-del-1")
 
 	// Simulate a crash mid-delete: intent recorded, objects still in place.
-	if _, err := h.pool.Exec(ctx,
+	if _, err := h.db.ExecContext(ctx,
 		`UPDATE pages SET status = 'deleting' WHERE slug = 'crash-del-1'`); err != nil {
 		t.Fatalf("force status: %v", err)
 	}
@@ -479,7 +430,7 @@ func TestDeleteResumesMidFlight(t *testing.T) {
 	}
 	h.mustExist(t, ctx, "crash-del-1/index.html", false)
 	var rows int
-	if err := h.pool.QueryRow(ctx,
+	if err := h.db.QueryRowContext(ctx,
 		`SELECT count(*) FROM pages WHERE slug = 'crash-del-1'`).Scan(&rows); err != nil || rows != 0 {
 		t.Fatalf("page rows after resume = %d/%v, want 0", rows, err)
 	}
@@ -491,7 +442,7 @@ func TestSweepResumesInterruptedDelete(t *testing.T) {
 	h.seedPage(t, ctx, "sw-del-1")
 
 	// Crash mid-delete: status recorded, objects not yet touched.
-	if _, err := h.pool.Exec(ctx,
+	if _, err := h.db.ExecContext(ctx,
 		`UPDATE pages SET status = 'deleting' WHERE slug = 'sw-del-1'`); err != nil {
 		t.Fatalf("force deleting: %v", err)
 	}
@@ -502,13 +453,13 @@ func TestSweepResumesInterruptedDelete(t *testing.T) {
 	h.mustExist(t, ctx, "sw-del-1/index.html", false)
 	h.mustExist(t, ctx, "_parked/sw-del-1/index.html", false)
 	var rows int
-	if err := h.pool.QueryRow(ctx,
+	if err := h.db.QueryRowContext(ctx,
 		`SELECT count(*) FROM pages WHERE slug = 'sw-del-1'`).Scan(&rows); err != nil || rows != 0 {
 		t.Fatalf("page rows after sweep = %d/%v, want 0", rows, err)
 	}
 
 	// The page no longer appears in the list (same filter the API serves).
-	pages, total, err := db.ListPages(ctx, h.pool, "", 50, 0)
+	pages, total, err := db.ListPages(ctx, h.db, "", 50, 0)
 	if err != nil || total != 0 || len(pages) != 0 {
 		t.Fatalf("list after sweep = %d/%d/%v, want 0/0/nil", len(pages), total, err)
 	}

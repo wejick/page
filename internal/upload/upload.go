@@ -18,7 +18,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"database/sql"
 
 	"page/internal/auth"
 	"page/internal/config"
@@ -31,7 +31,7 @@ import (
 
 // Handler serves the upload API.
 type Handler struct {
-	pool  *pgxpool.Pool
+	db    *sql.DB
 	store storage.Storage
 	caps  config.Caps
 	keep  ingest.KeepRules
@@ -41,7 +41,7 @@ type Handler struct {
 
 // Options carries handler dependencies.
 type Options struct {
-	Pool  *pgxpool.Pool
+	DB    *sql.DB
 	Store storage.Storage
 	Caps  config.Caps
 	Keep  ingest.KeepRules
@@ -55,7 +55,7 @@ func New(o Options) *Handler {
 	if guard == nil {
 		guard = fetch.Standard
 	}
-	return &Handler{pool: o.Pool, store: o.Store, caps: o.Caps, keep: o.Keep, authn: o.Auth, guard: guard}
+	return &Handler{db: o.DB, store: o.Store, caps: o.Caps, keep: o.Keep, authn: o.Auth, guard: guard}
 }
 
 // Create handles POST /api/pages.
@@ -161,7 +161,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	// backstop. Ingest is slug-dependent (refs rewrite to /a/{slug}/...), so
 	// it runs inside the retry loop; the fetch budget is per upload (D10).
 	for attempt := 0; attempt < 3; attempt++ {
-		slugStr, code, err := slug.New(ctx, h.pool, identifier)
+		slugStr, code, err := slug.New(ctx, h.db, identifier)
 		if err != nil {
 			if errors.Is(err, slug.ErrInvalidIdentifier) || errors.Is(err, slug.ErrReserved) {
 				http.Error(w, err.Error(), http.StatusUnprocessableEntity)
@@ -217,7 +217,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 			}
 			total += m.Bytes
 		}
-		err = db.CreatePage(ctx, h.pool, db.PageRecord{
+		err = db.CreatePage(ctx, h.db, db.PageRecord{
 			Slug: slugStr, Identifier: slugIdentifier(slugStr), Code: code,
 		}, assetRows, total)
 		if err != nil {
@@ -255,7 +255,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 	if !h.auth(w, r) {
 		return
 	}
-	meta, assets, err := db.GetPage(r.Context(), h.pool, r.PathValue("slug"))
+	meta, assets, err := db.GetPage(r.Context(), h.db, r.PathValue("slug"))
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			http.NotFound(w, r)
@@ -283,7 +283,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	offset, _ := strconv.Atoi(q.Get("offset"))
-	pages, total, err := db.ListPages(r.Context(), h.pool, q.Get("status"), limit, offset)
+	pages, total, err := db.ListPages(r.Context(), h.db, q.Get("status"), limit, offset)
 	if err != nil {
 		h.fail(w, r, "list pages", err)
 		return

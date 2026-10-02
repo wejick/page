@@ -14,29 +14,29 @@ func TestLoad(t *testing.T) {
 		check   func(t *testing.T, c Config)
 	}{
 		{
-			name:    "missing DATABASE_URL",
+			name:    "missing SQLITE_PATH",
 			env:     map[string]string{"AUTH_TOKEN": "t"},
 			wantErr: true,
 		},
 		{
 			name:    "missing AUTH_TOKEN",
-			env:     map[string]string{"DATABASE_URL": "postgres://x"},
+			env:     map[string]string{"SQLITE_PATH": "page.db"},
 			wantErr: true,
 		},
 		{
 			name:    "unknown driver",
-			env:     map[string]string{"DATABASE_URL": "p", "AUTH_TOKEN": "t", "STORAGE_DRIVER": "disk"},
+			env:     map[string]string{"SQLITE_PATH": "p", "AUTH_TOKEN": "t", "STORAGE_DRIVER": "disk"},
 			wantErr: true,
 		},
 		{
 			name:    "s3compat requires endpoint and creds",
-			env:     map[string]string{"DATABASE_URL": "p", "AUTH_TOKEN": "t"},
+			env:     map[string]string{"SQLITE_PATH": "p", "AUTH_TOKEN": "t"},
 			wantErr: true,
 		},
 		{
 			name: "mem driver needs no S3 vars",
 			env: map[string]string{
-				"DATABASE_URL": "postgres://x", "AUTH_TOKEN": "t", "STORAGE_DRIVER": "mem",
+				"SQLITE_PATH": "page.db", "AUTH_TOKEN": "t", "STORAGE_DRIVER": "mem",
 			},
 			check: func(t *testing.T, c Config) {
 				if c.Storage.Driver != "mem" {
@@ -50,7 +50,7 @@ func TestLoad(t *testing.T) {
 		{
 			name: "s3compat full",
 			env: map[string]string{
-				"DATABASE_URL": "postgres://x", "AUTH_TOKEN": "t",
+				"SQLITE_PATH": "page.db", "AUTH_TOKEN": "t",
 				"S3_ENDPOINT": "localhost:9000", "S3_ACCESS_KEY": "k", "S3_SECRET_KEY": "s",
 			},
 			check: func(t *testing.T, c Config) {
@@ -74,7 +74,7 @@ func TestLoad(t *testing.T) {
 		{
 			name: "overrides and allowlist trimming",
 			env: map[string]string{
-				"DATABASE_URL": "postgres://x", "AUTH_TOKEN": "t", "STORAGE_DRIVER": "mem",
+				"SQLITE_PATH": "page.db", "AUTH_TOKEN": "t", "STORAGE_DRIVER": "mem",
 				"ADDR": ":9090", "UPLOAD_MAX_FILES": "5",
 				"KEEP_EXTERNAL_JS": " Cdn.JsDelivr.net , unpkg.com ",
 			},
@@ -113,7 +113,7 @@ func TestLoad(t *testing.T) {
 // requires its IdP wiring, and serve mode requires none of it.
 func TestLoadAuthMode(t *testing.T) {
 	adminEnv := func(extra map[string]string) map[string]string {
-		env := map[string]string{"DATABASE_URL": "p", "STORAGE_DRIVER": "mem"}
+		env := map[string]string{"SQLITE_PATH": "p", "STORAGE_DRIVER": "mem"}
 		for k, v := range extra {
 			env[k] = v
 		}
@@ -250,17 +250,17 @@ func TestLoadMode(t *testing.T) {
 	}{
 		{
 			name:     "SERVER_MODE unset defaults to all",
-			env:      map[string]string{"DATABASE_URL": "p", "AUTH_TOKEN": "t", "STORAGE_DRIVER": "mem"},
+			env:      map[string]string{"SQLITE_PATH": "p", "AUTH_TOKEN": "t", "STORAGE_DRIVER": "mem"},
 			wantMode: ModeAll,
 		},
 		{
 			name:     "explicit all",
-			env:      map[string]string{"SERVER_MODE": "all", "DATABASE_URL": "p", "AUTH_TOKEN": "t", "STORAGE_DRIVER": "mem"},
+			env:      map[string]string{"SERVER_MODE": "all", "SQLITE_PATH": "p", "AUTH_TOKEN": "t", "STORAGE_DRIVER": "mem"},
 			wantMode: ModeAll,
 		},
 		{
 			name:     "admin with full config",
-			env:      map[string]string{"SERVER_MODE": "admin", "DATABASE_URL": "p", "AUTH_TOKEN": "t", "STORAGE_DRIVER": "mem"},
+			env:      map[string]string{"SERVER_MODE": "admin", "SQLITE_PATH": "p", "AUTH_TOKEN": "t", "STORAGE_DRIVER": "mem"},
 			wantMode: ModeAdmin,
 		},
 		{
@@ -281,36 +281,36 @@ func TestLoadMode(t *testing.T) {
 			env:         map[string]string{"SERVER_MODE": "serve"},
 			wantErr:     true,
 			errContains: []string{"S3_ENDPOINT", "S3_ACCESS_KEY", "S3_SECRET_KEY"},
-			errOmits:    []string{"DATABASE_URL", "AUTH_TOKEN"},
+			errOmits:    []string{"SQLITE_PATH", "AUTH_TOKEN"},
 		},
 		{
-			name:        "admin requires DATABASE_URL",
+			name:        "admin requires SQLITE_PATH",
 			env:         map[string]string{"SERVER_MODE": "admin", "AUTH_TOKEN": "t", "STORAGE_DRIVER": "mem"},
 			wantErr:     true,
-			errContains: []string{"DATABASE_URL"},
+			errContains: []string{"SQLITE_PATH"},
 		},
 		{
 			name:        "admin requires AUTH_TOKEN",
-			env:         map[string]string{"SERVER_MODE": "admin", "DATABASE_URL": "p", "STORAGE_DRIVER": "mem"},
+			env:         map[string]string{"SERVER_MODE": "admin", "SQLITE_PATH": "p", "STORAGE_DRIVER": "mem"},
 			wantErr:     true,
 			errContains: []string{"AUTH_TOKEN"},
 		},
 		{
-			name:        "all requires DATABASE_URL",
+			name:        "all requires SQLITE_PATH",
 			env:         map[string]string{"SERVER_MODE": "all", "AUTH_TOKEN": "t", "STORAGE_DRIVER": "mem"},
 			wantErr:     true,
-			errContains: []string{"DATABASE_URL"},
+			errContains: []string{"SQLITE_PATH"},
 		},
 		{
 			name:        "all requires AUTH_TOKEN",
-			env:         map[string]string{"SERVER_MODE": "all", "DATABASE_URL": "p", "STORAGE_DRIVER": "mem"},
+			env:         map[string]string{"SERVER_MODE": "all", "SQLITE_PATH": "p", "STORAGE_DRIVER": "mem"},
 			wantErr:     true,
 			errContains: []string{"AUTH_TOKEN"},
 		},
 		{
 			name: "unknown mode fails naming the valid modes",
 			env: map[string]string{
-				"SERVER_MODE": "both", "DATABASE_URL": "p", "AUTH_TOKEN": "t", "STORAGE_DRIVER": "mem",
+				"SERVER_MODE": "both", "SQLITE_PATH": "p", "AUTH_TOKEN": "t", "STORAGE_DRIVER": "mem",
 			},
 			wantErr:     true,
 			errContains: []string{"SERVER_MODE", "serve", "admin", "all"},
@@ -318,7 +318,7 @@ func TestLoadMode(t *testing.T) {
 		{
 			name: "mode value is case-sensitive",
 			env: map[string]string{
-				"SERVER_MODE": "Serve", "DATABASE_URL": "p", "AUTH_TOKEN": "t", "STORAGE_DRIVER": "mem",
+				"SERVER_MODE": "Serve", "SQLITE_PATH": "p", "AUTH_TOKEN": "t", "STORAGE_DRIVER": "mem",
 			},
 			wantErr:     true,
 			errContains: []string{"SERVER_MODE"},

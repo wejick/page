@@ -1,18 +1,4 @@
-# deployment-modes Specification
-
-## Purpose
-TBD - created by archiving change split-serve-admin-deployment. Update Purpose after archive.
-## Requirements
-### Requirement: Mode selection
-The system SHALL support a `SERVER_MODE` environment variable with values `serve`, `admin`, or `all` (default `all`). An invalid or unknown mode SHALL fail startup with a descriptive error. The default `all` mode SHALL preserve the current single-instance behavior: one process mounts and serves every plane.
-
-#### Scenario: Default mode boots everything
-- **WHEN** the service starts without `SERVER_MODE` set
-- **THEN** it behaves as `all`: serving routes, admin API, upload UI, and health are all mounted
-
-#### Scenario: Invalid mode fails fast
-- **WHEN** the service starts with `SERVER_MODE=both`
-- **THEN** startup fails with an error naming the valid modes, before opening any network listener
+## MODIFIED Requirements
 
 ### Requirement: Per-mode required configuration
 In `serve` mode the system SHALL require only storage configuration (`STORAGE_DRIVER` and its driver-specific settings) and SHALL NOT require `SQLITE_PATH`, `AUTH_TOKEN`, or any auth-mode configuration; it SHALL NOT open a database, run migrations, create the bucket, or run the lifecycle sweep. In `admin` and `all` modes the system SHALL require `SQLITE_PATH` in addition to storage configuration, and SHALL run migrations, bucket creation, and the lifecycle sweep at boot. Auth configuration SHALL be selected by `AUTH_MODE` (default `token`) and validated at startup: `token` requires `AUTH_TOKEN`; `none` MUST NOT be combined with `AUTH_TOKEN`; `oidc` requires `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_REDIRECT_URL`, and `SESSION_SECRET`, and MAY combine them with `AUTH_TOKEN` as the machine path. Missing or conflicting required configuration SHALL fail startup with errors naming the variables.
@@ -41,17 +27,6 @@ In `serve` mode the system SHALL require only storage configuration (`STORAGE_DR
 - **WHEN** an admin-mode instance starts with `AUTH_MODE=oidc`, all OIDC variables, `SESSION_SECRET`, and `AUTH_TOKEN` set
 - **THEN** startup succeeds (discovery and boot proceed against the configured IdP)
 
-### Requirement: Plane-scoped routing
-A serve-mode instance SHALL mount only the page-serving routes (`/p/*`, `/a/*`, `/healthz`) and SHALL answer `404` for `/` and `/api/*`. An admin-mode instance SHALL mount only the upload UI (`/`), the admin API (`/api/*`, including park/unpark), and `/healthz`, and SHALL answer `404` for `/p/*` and `/a/*`. An `all`-mode instance SHALL mount the full surface as today.
-
-#### Scenario: Serve instance does not expose the admin API
-- **WHEN** `POST /api/pages` is sent to a serve-mode instance
-- **THEN** the response is `404` and no upload or ingest occurs
-
-#### Scenario: Admin instance does not serve pages
-- **WHEN** `GET /p/some-slug-1/` is sent to an admin-mode instance
-- **THEN** the response is `404`
-
 ### Requirement: Per-mode health probes
 In `serve` mode, `GET /healthz` SHALL probe object storage (a `Stat` request): any storage response, including `ErrNotFound` for a missing probe key, SHALL report healthy; a storage transport failure SHALL report `503`. In `admin` and `all` modes, `/healthz` SHALL probe the database (a trivial SQLite query). Serve-mode health MUST NOT depend on the database.
 
@@ -67,6 +42,14 @@ In `serve` mode, `GET /healthz` SHALL probe object storage (a `Stat` request): a
 - **WHEN** the SQLite database file is unreadable (missing, corrupt, or permission-denied) and `GET /healthz` is received by an admin-mode instance
 - **THEN** the response is `503`
 
+## REMOVED Requirements
+
+### Requirement: Concurrent admin boots migrate safely
+**Reason**: A shared file cannot serve concurrent writers; the advisory-lock guarantee this requirement described belonged to Postgres-as-a-shared-service.
+**Migration**: Replaced by the single-writer contract below — at most one admin writer per database file, same-file concurrent boots still safe, failover restore-based via the Litestream replica.
+
+## ADDED Requirements
+
 ### Requirement: Single admin writer replaces replica concurrency
 The deployment SHALL run at most one admin writer per database file. Two admin processes booting against the same database file SHALL still both succeed (migrations serialize on SQLite's write lock and are applied exactly once). Running admin instances on two different hosts against one database file is a deployment error and MUST be prevented by orchestration, not by the application. Failover SHALL be restore-based: restore the database from its Litestream replica on a new host, then start one admin.
 
@@ -77,4 +60,3 @@ The deployment SHALL run at most one admin writer per database file. Two admin p
 #### Scenario: Documented single-writer contract
 - **WHEN** an operator consults the deployment documentation
 - **THEN** it states that exactly one admin writer is permitted and that failover is restore-based via the Litestream replica
-
