@@ -42,6 +42,10 @@
   .btn:active { background: var(--border); }
   .btn.danger { border-color: #c0392b; color: #c0392b; }
   .btn.danger:hover { background: var(--err-bg); }
+  .btn.primary { background: var(--accent); border-color: var(--accent);
+                 color: #fff; font-weight: 600; }
+  .btn.primary:hover:not(:disabled) { background: var(--accent-hover); }
+  #go { margin-top: 1.25rem; width: 100%; font-size: 1rem; padding: .6rem; }
   button:disabled { opacity: .45; cursor: not-allowed; }
   :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
   .chip { padding: .25rem .7rem; font-size: .85rem; border-radius: 99px;
@@ -82,21 +86,49 @@
   #result .sum { margin-top: .5rem; }
   #result .sum.warn { color: var(--warn-text); }
   label { display: block; margin: 1rem 0 .3rem; font-weight: 600; }
-  input[type=text], select { padding: .4rem; }
-  #identifier { width: 100%; box-sizing: border-box; margin-bottom: .5rem; }
-  #srcurl { width: 100%; box-sizing: border-box; margin-bottom: .5rem; }
+  input[type=text], select { padding: .5rem .7rem; border: 2px solid #99a3af;
+                             border-radius: 6px; box-sizing: border-box; }
   .unresolved { margin: .6rem 0 0; padding-left: 1.25rem;
                 word-break: break-all; text-align: left; }
-  .dropzone { display: block; margin: .25rem 0 0; padding: 1.5rem 1rem;
-              border: 2px dashed var(--border-strong); border-radius: 8px;
-              text-align: center; color: var(--muted); font-weight: normal;
-              cursor: pointer; }
-  .dropzone:hover { border-color: var(--accent); }
-  .dropzone.over { border-color: var(--accent); background: #f0f5ff;
-                   color: var(--text); }
-  .dropzone:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
-  .dropzone .chosen { display: block; margin-top: .6rem; color: var(--text);
-                      font-size: .93rem; }
+  /* One-surface source card (one-surface-upload-ui D1): drop layer on top,
+     URL input as the footer. The URL input is a DOM sibling of the file
+     label, not a child — a label forwards clicks to its target, so nesting
+     would open the file picker on every click into the URL field (D3). */
+  .srccard { border: 1px solid var(--border-strong); border-radius: 10px;
+             overflow: hidden; background: var(--bg);
+             box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+  .srccard .drop { display: block; padding: 3rem 1rem; text-align: center;
+                   cursor: pointer; background: var(--hover); }
+  .srccard .drop.over { background: #eef4ff;
+                        box-shadow: inset 0 0 0 2px var(--accent); }
+  .srccard .drop:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
+  .srccard .drop .icon { font-size: 2rem; margin-bottom: .5rem; }
+  .srccard .drop .big { font-weight: 700; font-size: 1.05rem; }
+  .srccard .drop .sub { color: var(--muted); margin-top: .3rem; font-size: .9rem; }
+  .srccard .footer { border-top: 1px solid var(--border); padding: .8rem 1rem; }
+  .srccard .footer.dimmed { background: var(--hover); }
+  .srccard .row { display: flex; align-items: center; gap: .5rem; }
+  .srccard .row .link { font-size: 1.05rem; }
+  .srccard .row input { flex: 1; }
+  /* The summary chip always shows the one source Publish will send
+     (one-surface-upload-ui D2). */
+  .source { display: flex; align-items: center; gap: .6rem;
+            padding: .7rem .9rem; border: 1px solid var(--ok-border);
+            background: var(--ok-bg); color: var(--ok-text);
+            border-radius: 8px; font-size: .95rem; text-align: left; }
+  .source .name { font-weight: 600; word-break: break-all; }
+  .source .size { color: var(--muted); font-weight: normal; white-space: nowrap; }
+  .source .clear { margin-left: auto; border: none; background: none;
+                   cursor: pointer; color: inherit; font-size: 1rem;
+                   padding: .1rem .4rem; border-radius: 4px; }
+  .source .clear:hover { background: rgba(0,0,0,.08); }
+  .below { margin-top: 1.25rem; }
+  .below input[type=text] { width: 100%; }
+  .preview { margin-top: .4rem; font-size: .85rem; color: var(--muted); }
+  .preview code { background: var(--hover); padding: .1rem .4rem;
+                  border-radius: 4px; color: var(--text); }
+  .preview .warn { color: var(--warn-text); }
+  .ferr { margin-top: .35rem; font-size: .85rem; color: var(--err-text); }
   .visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px;
                      overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   nav.pager { margin-top: .8rem; display: flex; gap: .75rem; align-items: center; }
@@ -412,68 +444,159 @@ async function renderDetail(slug) {
   bindActions(view, () => renderDetail(slug));
 }
 
+// The upload view is one source card (one-surface-upload-ui D1): a drop
+// layer spanning the card and a URL footer, with last-action-wins selection
+// (D2) — the card always shows the single source Publish sends, so the
+// "not both" error state is unreachable and the server's 422 stays as the
+// backstop.
 function renderUpload() {
   view.innerHTML = `
-    <h2>Publish a static page</h2>
-    <p class="muted">Upload a single HTML file or a zip pack (Figma/Framer export, browser save-as), or import a page by URL — the server fetches it and bakes its assets.
-A new immutable page is created every time.</p>
-    <label for="identifier">Identifier (optional)</label>
-    <input type="text" id="identifier" placeholder="landing-page → landing-page-1">
-    <label for="srcurl">Import by URL</label>
-    <input type="text" id="srcurl" placeholder="https://example.com/post" autocomplete="off">
-    <label for="file">HTML file or zip pack</label>
-    <label class="dropzone" id="dropzone" for="file">
-      <strong>Drop an HTML file or zip pack here</strong><br>
-      or click to browse
-      <input type="file" id="file" class="visually-hidden" accept=".html,.htm,.zip">
-      <span class="chosen" id="chosen"></span>
-    </label>
-    <button id="go" class="btn">Publish</button>
+    <h2>Publish new page</h2>
+    <div class="srccard" id="zone">
+      <label class="drop" id="droplayer" for="file">
+        <input type="file" id="file" class="visually-hidden" accept=".html,.htm,.zip">
+        <div class="dropcontent" id="dropcontent"></div>
+      </label>
+      <div class="footer" id="srcfooter">
+        <div class="row">
+          <span class="link">🔗</span>
+          <input type="text" id="srcurl" placeholder="or paste a link…" autocomplete="off">
+        </div>
+      </div>
+    </div>
+    <div class="below">
+      <label for="identifier">Identifier</label>
+      <input type="text" id="identifier" placeholder="landing-page" autocomplete="off">
+      <div class="preview" id="ident-preview"></div>
+      <div class="ferr" id="ident-err" hidden>Identifier is required.</div>
+      <button id="go" class="btn primary">Publish</button>
+    </div>
     <div id="result"></div>`;
 
   const result = $("result");
-  const dropzone = $("dropzone");
+  const zone = $("zone");
+  const droplayer = $("droplayer");
+  let source = { type: null }; // null | {type:"file", f} | {type:"url", v}
+
   // Client-side extension check is a hint, not the validator — the server
   // decides. A rejected file never reaches a request (D7).
   const validName = (f) => /\.(html|htm|zip)$/i.test(f.name);
-  function showChosen(f) {
-    $("chosen").textContent = f ? `${f.name} — ${fmtBytes(f.size)}` : "";
+
+  // The preview mirrors slug.Sanitize and the reserved set so it shows the
+  // real final URL shape; it is never authoritative — the server
+  // re-validates (one-surface-upload-ui D4).
+  const RESERVED = new Set(["api", "a", "p", "ui", "www", "assets", "cdn", "static", "healthz"]);
+  const sanitizeIdent = (s) => {
+    s = s.trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-")
+         .replace(/-{2,}/g, "-").replace(/^-+|-+$/g, "");
+    return s.length > 64 ? s.slice(0, 64).replace(/-+$/, "") : s;
+  };
+  function updateIdentPreview() {
+    const s = sanitizeIdent($("identifier").value);
+    const pv = $("ident-preview");
+    $("ident-err").hidden = true;
+    if (!s) { pv.innerHTML = ""; return; }
+    if (RESERVED.has(s)) {
+      pv.innerHTML = `<span class="warn">"${esc(s)}" is reserved — pick another</span>`;
+      return;
+    }
+    // A first publish for an identifier always gets code 1; later codes are
+    // server-side state the UI cannot know, and the result corrects it (D5).
+    pv.innerHTML = `will be published at <code>/p/${esc(s)}-1</code>`;
+  }
+  function requireIdent() {
+    const s = sanitizeIdent($("identifier").value);
+    if (!s) {
+      $("ident-err").hidden = false;
+      $("identifier").focus();
+      return null;
+    }
+    if (RESERVED.has(s)) {
+      // the preview line already carries the reserved warning; block + focus
+      $("identifier").focus();
+      return null;
+    }
+    $("ident-err").hidden = true;
+    return s;
+  }
+
+  // Only #dropcontent is rebuilt on state changes; the label and the file
+  // input above it stay in the DOM, so their bindings survive every swap.
+  function renderSource() {
+    if (source.type === null) {
+      droplayer.classList.remove("filled");
+      $("dropcontent").innerHTML = `
+        <div class="icon">📄</div>
+        <div class="big">Drop your page here</div>
+        <div class="sub">an HTML file or a zip pack — or click to browse</div>`;
+      $("srcfooter").classList.add("dimmed");
+    } else {
+      droplayer.classList.add("filled");
+      const name = esc(source.type === "file" ? source.f.name : source.v);
+      const size = source.type === "file" ? `<span class="size">${fmtBytes(source.f.size)}</span>` : "";
+      $("dropcontent").innerHTML = `
+        <div class="source"><span>✓</span><span class="name">${name}</span>${size}
+          <button class="clear" id="srcclear" type="button" title="clear">✕</button></div>`;
+      $("srcfooter").classList.remove("dimmed");
+      $("srcclear").onclick = clearSource;
+    }
   }
   function setFile(f) {
     if (!f) return;
     if (!validName(f)) {
-      showChosen(null);
-      $("file").value = "";
       result.className = "err"; result.style.display = "block";
       result.textContent = `Unsupported file type: ${f.name}. Use .html, .htm or .zip.`;
       return;
     }
     result.className = ""; result.style.display = "none";
-    const dt = new DataTransfer();
-    dt.items.add(f);
-    $("file").files = dt.files;
-    showChosen(f);
+    source = { type: "file", f };
+    $("srcurl").value = ""; // last action wins (one-surface-upload-ui D2)
+    renderSource();
   }
-  $("file").onchange = () => setFile($("file").files[0]);
+  function setUrl() {
+    const v = $("srcurl").value.trim();
+    if (v) source = { type: "url", v };
+    else if (source.type === "url") source = { type: null };
+    else return;
+    renderSource();
+  }
+  function clearSource() {
+    source = { type: null };
+    $("srcurl").value = "";
+    renderSource();
+  }
+
+  // The drop handler covers the whole card, so a file dropped on the URL
+  // input area still lands as the file source (one-surface-upload-ui D3).
   ["dragenter", "dragover"].forEach((ev) =>
-    dropzone.addEventListener(ev, (e) => { e.preventDefault(); dropzone.classList.add("over"); }));
+    zone.addEventListener(ev, (e) => { e.preventDefault(); droplayer.classList.add("over"); }));
   ["dragleave", "drop"].forEach((ev) =>
-    dropzone.addEventListener(ev, (e) => { e.preventDefault(); dropzone.classList.remove("over"); }));
-  dropzone.addEventListener("drop", (e) => setFile(e.dataTransfer.files[0]));
+    zone.addEventListener(ev, (e) => { e.preventDefault(); droplayer.classList.remove("over"); }));
+  zone.addEventListener("drop", (e) => {
+    const f = e.dataTransfer.files[0];
+    if (f) setFile(f);
+  });
+  $("file").onchange = () => setFile($("file").files[0]);
+  $("srcurl").oninput = setUrl;
+  $("identifier").oninput = updateIdentPreview;
+  renderSource();
+  updateIdentPreview();
 
   $("go").onclick = async () => {
-    const file = $("file").files[0];
-    const srcurl = $("srcurl").value.trim();
-    result.className = ""; result.style.display = "block";
-    if (srcurl && file) { result.classList.add("err"); result.textContent = "Provide a URL or a file, not both."; return; }
-    if (!srcurl && !file) { result.classList.add("err"); result.textContent = "Choose a file or enter a URL first."; return; }
+    const ident = requireIdent();
+    if (!ident) return;
+    if (!source.type) {
+      result.className = "err"; result.style.display = "block";
+      result.textContent = "Choose a file or enter a URL first.";
+      return;
+    }
     const fd = new FormData();
-    if (srcurl) fd.append("url", srcurl);
-    else fd.append("file", file);
-    const ident = $("identifier").value.trim();
-    if (ident) fd.append("identifier", ident);
+    if (source.type === "url") fd.append("url", source.v);
+    else fd.append("file", source.f);
+    fd.append("identifier", ident);
+    result.className = ""; result.style.display = "block";
     const go = $("go");
-    go.disabled = true; go.textContent = srcurl ? "Importing…" : "Uploading…";
+    go.disabled = true; go.textContent = source.type === "url" ? "Importing…" : "Uploading…";
     try {
       const res = await api("/api/pages", { method: "POST", body: fd });
       // Errors may be JSON (validation, strict gate) or plain text (fetch
