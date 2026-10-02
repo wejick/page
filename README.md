@@ -26,10 +26,14 @@ open http://localhost:8080/p/sample-1/
 
 Open `http://localhost:8080/`, enter token `devtoken`, and you get the
 management UI: every page with its lifecycle status, the full asset manifest
-per page, park/unpark, and permanent delete. Upload lives there too —
-optionally set an identifier and drop an `.html` file or a `.zip`:
+per page, park/unpark, and permanent delete:
 
 ![Web admin — manage pages](screenshot.png)
+
+On the upload page you can set an identifier, import a page by URL, or
+drop an `.html` file or a `.zip`:
+
+![Web admin — upload](screenshot-upload.png)
 
 Or use the API:
 
