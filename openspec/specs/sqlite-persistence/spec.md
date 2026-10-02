@@ -1,7 +1,14 @@
 # sqlite-persistence Specification
 
 ## Purpose
-TBD - created by archiving change replace-postgres-with-sqlite. Update Purpose after archive.
+
+Covers the write-side database: a single SQLite file (WAL mode) holding page
+rows, the asset manifest, slug counters, and lifecycle status. The serve
+plane never opens it; admin/all own its boot duties. One admin writer per
+file, with a Litestream sidecar shipping the WAL to the page bucket for
+restore-based recovery. Introduced by the replace-postgres-with-sqlite
+change; there is no migration path from other engines.
+
 ## Requirements
 ### Requirement: SQLite is the write-side store
 The write-side persistence (page rows, asset manifest, slug counters, lifecycle status) SHALL be a single SQLite database file in WAL mode, opened with `busy_timeout`, `foreign_keys=1`, and `synchronous=NORMAL`. The serve plane SHALL NOT open the database. The schema SHALL be created by the same ordered, version-tracked migration mechanism (a `schema_migrations` table), with each migration applied atomically.
@@ -38,11 +45,3 @@ Deployment SHALL run a Litestream sidecar that continuously replicates the datab
 #### Scenario: Replica objects are not publicly served
 - **WHEN** a request targets `/p/_db/...` or any path whose first segment starts with `_`
 - **THEN** no replica object is served (the identifier sanitization and reserved prefixes prevent such a slug from existing)
-
-### Requirement: One-time migration from Postgres
-A one-time command SHALL move existing rows (pages, assets, counters) from an existing Postgres instance into the SQLite database. Slug counters SHALL be copied exactly — codes never move backward.
-
-#### Scenario: Row move preserves counters
-- **WHEN** the migration command runs against a Postgres instance whose counter for identifier `x` is 7
-- **THEN** the SQLite counter for `x` is 7 and the next allocated code is 7
-

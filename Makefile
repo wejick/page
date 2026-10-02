@@ -28,8 +28,5 @@ test:
 test-integration:
 	go test -tags=integration ./...
 
-pgmigrate:
-	$(DEV_ENV) go run ./cmd/pgmigrate # one-time Postgres → SQLite row move
-
 tidy:
 	go mod tidy

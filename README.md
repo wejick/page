@@ -81,46 +81,45 @@ but never reuses its code — slug counters only move forward.
 Storage works with any S3-compatible endpoint (AWS S3, R2, B2, Spaces,
 MinIO, …), configured entirely via env.
 
-### Database and recovery (Litestream)
+### Back up the database (Litestream)
 
-The write side keeps pages, the asset manifest, and slug counters in one
-SQLite file (`SQLITE_PATH`) — the serve path never reads it. In production a
-[Litestream](https://litestream.io) sidecar continuously replicates the
-database's WAL into the same S3 bucket under the reserved `_db/` prefix
-(replica objects are unreachable from the public edge, which only maps
-`/p/*` and `/a/*` into the bucket):
+Page metadata is stored in a SQLite database (`SQLITE_PATH`) and synced to
+your S3 bucket with [Litestream](https://litestream.io). SQLite is not
+needed on the serving side — only the admin server uses it.
 
-```yaml
-# litestream.yml — runs beside the admin/all instance
-dbs:
-  - path: /data/page.db
-    replicas:
-      - url: s3://pages/_db
-        endpoint: http://s3.internal:9000   # or your provider's endpoint
-        access-key-id: ...
-        secret-access-key: ...
-```
+Set it up on the host that runs the server:
 
-Deployment rules:
+1. Install Litestream, then point it at your database and bucket in
+   `litestream.yml`:
 
-- **One admin writer.** SQLite is a local file: exactly one admin/all
-  instance may write it. Two processes booting against the same file are
-  safe (migrations serialize on SQLite's write lock), but two hosts must
-  never write one database — orchestration must prevent it.
-- **Boot order:** `litestream restore -if-db-not-exists -o /data/page.db
-  s3://pages/_db` before the server starts, then the server (migrations run
-  on boot), then `litestream replicate`. On a fresh host the restore
-  recovers the bookkeeping; without it the database starts empty.
-- **Recovery window:** replication is asynchronous (~1s). After a crash and
-  restore, the bucket can be a hair ahead of the database — an uploaded page
-  may serve without a manifest row, or a parked page's status may read
-  `live` while its objects sit under `_parked/`. Re-running the operation
-  converges both (uploads re-write their rows; toggles re-run their move).
-  If the admin UI and the bucket ever disagree, re-run the toggle.
+   ```yaml
+   dbs:
+     - path: /data/page.db
+       replicas:
+         - url: s3://pages/_db
+   ```
 
-Moving an existing Postgres deployment: run `go run ./cmd/pgmigrate -pg
-$DATABASE_URL -sqlite /data/page.db` once against a fresh target (it refuses
-a non-empty one).
+   For AWS S3, give Litestream the credentials via `LITESTREAM_ACCESS_KEY_ID`
+   and `LITESTREAM_SECRET_ACCESS_KEY`. For other S3-compatible stores
+   (MinIO, R2, …), add `endpoint:` to the replica and use that store's keys.
+
+2. Start the backup next to the server:
+
+   ```bash
+   litestream replicate
+   ```
+
+3. On a replacement host, restore the latest backup before starting the
+   server:
+
+   ```bash
+   litestream restore -if-db-not-exists -o /data/page.db s3://pages/_db
+   ```
+
+Two rules: make sure to run only one Litestream sync — a second one
+corrupts the backup on S3 — and if the admin UI and the served pages ever
+disagree, repeat the last action (upload, park, or unpark); every operation
+is safe to re-run.
 
 ### Admin auth modes
 
