@@ -19,7 +19,7 @@ func testOIDC(t *testing.T) *OIDC {
 	t.Helper()
 	idp := oidctest.New(t)
 	o, err := NewOIDC(t.Context(), config.OIDC{Issuer: idp.Issuer, ClientID: idp.ClientID,
-		ClientSecret: idp.ClientSecret, RedirectURL: "https://app.test/auth/callback"}, "test-session-secret")
+		ClientSecret: idp.ClientSecret, RedirectURL: "https://app.test/auth/callback"}, "test-session-secret", nil)
 	if err != nil {
 		t.Fatalf("NewOIDC: %v", err)
 	}

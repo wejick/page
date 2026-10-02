@@ -127,7 +127,7 @@ func TestPlaneScopedRouting(t *testing.T) {
 		o := Options{Mode: mode}
 		if mode != config.ModeServe {
 			o.Upload = upload.New(upload.Options{Auth: auth.NewChecker(config.AuthModeToken, testToken, nil)})
-			o.Lifecycle = lifecycle.NewAPI(lifecycle.New(nil, nil), auth.NewChecker(config.AuthModeToken, testToken, nil))
+			o.Lifecycle = lifecycle.NewAPI(lifecycle.New(nil, nil, nil), auth.NewChecker(config.AuthModeToken, testToken, nil), nil, nil)
 		}
 		return o
 	}

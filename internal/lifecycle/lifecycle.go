@@ -46,14 +46,18 @@ var (
 type Service struct {
 	db    *sql.DB
 	store storage.Storage
+	log   *slog.Logger
 
 	mu    sync.Mutex
 	locks map[string]*sync.Mutex // per-slug: serialize toggles in-process
 }
 
-// New builds the lifecycle service.
-func New(db *sql.DB, store storage.Storage) *Service {
-	return &Service{db: db, store: store, locks: make(map[string]*sync.Mutex)}
+// New builds the lifecycle service. log may be nil → slog default.
+func New(log *slog.Logger, db *sql.DB, store storage.Storage) *Service {
+	if log == nil {
+		log = slog.Default()
+	}
+	return &Service{db: db, store: store, log: log, locks: make(map[string]*sync.Mutex)}
 }
 
 // placeholders returns n comma-separated ? markers for an IN list.
@@ -270,7 +274,7 @@ func (s *Service) Sweep(ctx context.Context) error {
 				return err
 			}
 			unlock.Unlock()
-			slog.Info("lifecycle: resumed interrupted delete",
+			s.log.Info("lifecycle", "what", "resumed interrupted delete",
 				"slug", p.slug)
 			continue
 		}
@@ -287,7 +291,7 @@ func (s *Service) Sweep(ctx context.Context) error {
 			return err
 		}
 		unlock.Unlock()
-		slog.Info("lifecycle: resumed interrupted toggle",
+		s.log.Info("lifecycle", "what", "resumed interrupted toggle",
 			"slug", p.slug, "status", done)
 	}
 	return nil

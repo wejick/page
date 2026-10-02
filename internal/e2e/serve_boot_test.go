@@ -53,10 +53,10 @@ func TestServeModeBootsWithoutDatabase(t *testing.T) {
 		},
 		Auth: tokenChecker(),
 	})
-	lc := lifecycle.New(pool, store)
+	lc := lifecycle.New(nil, pool, store)
 	ts := httptest.NewServer(serve.New(serve.Options{
 		Mode: config.ModeAll, Store: store, CacheTTL: time.Second,
-		Upload: api, Lifecycle: lifecycle.NewAPI(lc, tokenChecker()), Auth: tokenChecker(), Ping: dbPing(pool),
+		Upload: api, Lifecycle: lifecycle.NewAPI(lc, tokenChecker(), nil, nil), Auth: tokenChecker(), Ping: dbPing(pool),
 	}))
 
 	mb, contentType := uploadBody(t, seedPack, "serveboot")

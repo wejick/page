@@ -36,7 +36,7 @@ func authModeRouter(t *testing.T, seed map[string][2]string, mode config.AuthMod
 		idp := oidctest.New(t)
 		flow, err := auth.NewOIDC(t.Context(), config.OIDC{Issuer: idp.Issuer,
 			ClientID: idp.ClientID, ClientSecret: idp.ClientSecret,
-			RedirectURL: "https://app.test/auth/callback"}, "test-session-secret")
+			RedirectURL: "https://app.test/auth/callback"}, "test-session-secret", nil)
 		if err != nil {
 			t.Fatalf("NewOIDC: %v", err)
 		}
@@ -44,7 +44,7 @@ func authModeRouter(t *testing.T, seed map[string][2]string, mode config.AuthMod
 	}
 	checker := auth.NewChecker(mode, testToken, oidcFlow)
 	o := Options{Store: seededStore(t, seed), Upload: upload.New(upload.Options{Auth: checker}),
-		Lifecycle: lifecycle.NewAPI(lifecycle.New(nil, nil), checker), Auth: checker}
+		Lifecycle: lifecycle.NewAPI(lifecycle.New(nil, nil, nil), checker, nil, nil), Auth: checker}
 	ts := httptest.NewServer(New(o))
 	t.Cleanup(ts.Close)
 	return ts, checker
@@ -114,7 +114,7 @@ func TestAuthModeRouting(t *testing.T) {
 		// open it (auth-modes D1).
 		o := Options{Store: seededStore(t, seed),
 			Upload:    upload.New(upload.Options{DB: nil, Store: seededStore(t, seed)}),
-			Lifecycle: lifecycle.NewAPI(lifecycle.New(nil, nil), nil)}
+			Lifecycle: lifecycle.NewAPI(lifecycle.New(nil, nil, nil), nil, nil, nil)}
 		ts := httptest.NewServer(New(o))
 		t.Cleanup(ts.Close)
 		if status, _, _ := doJSON(t, ts, "GET", "/api/pages", nil); status != 401 {

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -100,6 +101,91 @@ func TestLoad(t *testing.T) {
 			}
 			if err != nil {
 				t.Fatalf("Load() err = %v", err)
+			}
+			if tt.check != nil {
+				tt.check(t, cfg)
+			}
+		})
+	}
+}
+
+// TestLoadObservability covers the LOG_LEVEL and OTEL_* knobs
+// (observability D1, D5): info is the default, level names are validated
+// eagerly, and only the http/protobuf OTLP protocol is accepted.
+func TestLoadObservability(t *testing.T) {
+	base := map[string]string{"SQLITE_PATH": "p", "STORAGE_DRIVER": "mem", "AUTH_TOKEN": "t"}
+	tests := []struct {
+		name    string
+		extra   map[string]string
+		wantErr bool
+		check   func(t *testing.T, c Config)
+	}{
+		{
+			name: "defaults",
+			check: func(t *testing.T, c Config) {
+				if c.LogLevel != slog.LevelInfo {
+					t.Fatalf("log level = %v, want info", c.LogLevel)
+				}
+				if c.OTelEndpoint != "" || c.OTelProtocol != "" {
+					t.Fatalf("otel = %q/%q, want unset", c.OTelEndpoint, c.OTelProtocol)
+				}
+			},
+		},
+		{
+			name:  "valid level",
+			extra: map[string]string{"LOG_LEVEL": "debug"},
+			check: func(t *testing.T, c Config) {
+				if c.LogLevel != slog.LevelDebug {
+					t.Fatalf("log level = %v, want debug", c.LogLevel)
+				}
+			},
+		},
+		{
+			name:    "invalid level",
+			extra:   map[string]string{"LOG_LEVEL": "loud"},
+			wantErr: true,
+		},
+		{
+			name:  "otel endpoint set",
+			extra: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4318"},
+			check: func(t *testing.T, c Config) {
+				if c.OTelEndpoint != "http://collector:4318" {
+					t.Fatalf("endpoint = %q", c.OTelEndpoint)
+				}
+			},
+		},
+		{
+			name: "http/protobuf protocol accepted",
+			extra: map[string]string{
+				"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4318",
+				"OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
+			},
+			check: func(t *testing.T, c Config) {},
+		},
+		{
+			name: "grpc protocol rejected",
+			extra: map[string]string{
+				"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector:4318",
+				"OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
+			},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := map[string]string{}
+			for k, v := range base {
+				env[k] = v
+			}
+			for k, v := range tt.extra {
+				env[k] = v
+			}
+			cfg, err := Load(func(key string) string { return env[key] })
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Load() err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if err != nil {
+				return
 			}
 			if tt.check != nil {
 				tt.check(t, cfg)

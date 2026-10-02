@@ -68,7 +68,7 @@ func oidcStack(t *testing.T, ctx context.Context) string {
 	flow, err := auth.NewOIDC(ctx, config.OIDC{
 		Issuer: idp.Issuer, ClientID: idp.ClientID, ClientSecret: idp.ClientSecret,
 		RedirectURL: callback,
-	}, testSessionSecret)
+	}, testSessionSecret, nil)
 	if err != nil {
 		t.Fatalf("NewOIDC: %v", err)
 	}
@@ -78,10 +78,10 @@ func oidcStack(t *testing.T, ctx context.Context) string {
 		Caps: testCaps(), Keep: testKeep(),
 		Auth: checker,
 	})
-	lc := lifecycle.New(pool, store)
+	lc := lifecycle.New(nil, pool, store)
 	handler := serve.New(serve.Options{
 		Store: store, Upload: api,
-		Lifecycle: lifecycle.NewAPI(lc, checker), Auth: checker, Ping: dbPing(pool),
+		Lifecycle: lifecycle.NewAPI(lc, checker, nil, nil), Auth: checker, Ping: dbPing(pool),
 	})
 	srv := &http.Server{Handler: handler}
 	go func() { _ = srv.Serve(lis) }()
@@ -221,10 +221,10 @@ func TestNoneModeEndToEnd(t *testing.T) {
 	api := upload.New(upload.Options{
 		DB: pool, Store: store, Caps: testCaps(), Keep: testKeep(), Auth: checker,
 	})
-	lc := lifecycle.New(pool, store)
+	lc := lifecycle.New(nil, pool, store)
 	ts := newTestServer(t, serve.New(serve.Options{
 		Store: store, Upload: api,
-		Lifecycle: lifecycle.NewAPI(lc, checker), Auth: checker, Ping: dbPing(pool),
+		Lifecycle: lifecycle.NewAPI(lc, checker, nil, nil), Auth: checker, Ping: dbPing(pool),
 	}))
 	defer ts.Close()
 

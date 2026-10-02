@@ -8,15 +8,21 @@ package serve
 import (
 	"context"
 	"embed"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/noop"
+
 	"page/internal/auth"
 	"page/internal/config"
+	"page/internal/httpx"
 	"page/internal/lifecycle"
 	"page/internal/storage"
 	"page/internal/upload"
@@ -35,6 +41,11 @@ type Options struct {
 	Lifecycle     *lifecycle.API              // park/unpark endpoints (admin/all planes); nil omits them
 	Auth          *auth.Checker               // admin-plane auth (auth-modes D7); nil or flowless fails closed
 	Ping          func(context.Context) error // health probe; storage Stat in serve mode, database ping in admin/all
+
+	// Observability (observability D1, D5): nil → slog default logger and a
+	// noop meter, so tests and serve mode boot with identical behavior.
+	Log   *slog.Logger
+	Meter metric.Meter
 }
 
 // Handler serves pages and assets.
@@ -44,41 +55,65 @@ type Handler struct {
 	api   *upload.Handler
 	authn *auth.Checker
 	ping  func(context.Context) error
+
+	log       *slog.Logger
+	instr     instrumentation
+	startedAt time.Time
+	version   string
 }
 
 // New builds the service router, scoped to the planes Options.Mode selects:
 // serve mounts only the page/asset routes and health, admin only the upload
-// UI and admin API, all (including the zero value) everything.
+// UI and admin API, all (including the zero value) everything. Every route
+// is registered through withRoute, and the mux is wrapped in the
+// request-id/recovery/access-log chain (observability D3, D4).
 func New(o Options) http.Handler {
-	h := &Handler{store: o.Store, api: o.Upload, authn: o.Auth, ping: o.Ping}
-	h.cache = newHTMLCache(o.CacheMaxBytes, o.CacheTTL)
+	h := &Handler{store: o.Store, api: o.Upload, authn: o.Auth, ping: o.Ping,
+		startedAt: time.Now(), version: ModuleVersion()}
+	h.log = o.Log
+	if h.log == nil {
+		h.log = slog.Default()
+	}
+	meter := o.Meter
+	if meter == nil {
+		meter = noop.NewMeterProvider().Meter("page")
+	}
+	h.instr = newInstrumentation(meter)
+	h.cache = newHTMLCache(o.CacheMaxBytes, o.CacheTTL, meter)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", h.healthz)
+	route := func(pattern string, handler http.Handler) {
+		mux.Handle(pattern, h.withRoute(pattern, handler))
+	}
+	handleFunc := func(pattern string, handler http.HandlerFunc) {
+		route(pattern, handler)
+	}
+
+	handleFunc("GET /healthz", h.healthz)
 
 	// Upload API (auth inside the handler via the shared checker, auth-modes
 	// D7). Serve mode never builds these deps; a nil one simply mounts
 	// nothing instead of panicking.
 	api := func() {
 		if o.Upload != nil {
-			mux.Handle("POST /api/pages", o.Upload.Create())
-			mux.Handle("GET /api/pages/{slug}", o.Upload.Get())
-			mux.Handle("GET /api/pages", o.Upload.List())
+			route("POST /api/pages", o.Upload.Create())
+			route("GET /api/pages/{slug}", o.Upload.Get())
+			route("GET /api/pages", o.Upload.List())
 		}
 		// Park/unpark toggle and hard delete (same checker).
 		if o.Lifecycle != nil {
-			mux.Handle("POST /api/pages/{slug}/park", o.Lifecycle.Park())
-			mux.Handle("POST /api/pages/{slug}/unpark", o.Lifecycle.Unpark())
-			mux.Handle("DELETE /api/pages/{slug}", o.Lifecycle.Delete())
+			route("POST /api/pages/{slug}/park", o.Lifecycle.Park())
+			route("POST /api/pages/{slug}/unpark", o.Lifecycle.Unpark())
+			route("DELETE /api/pages/{slug}", o.Lifecycle.Delete())
 		}
 	}
 	pages := func() {
 		// Pages: slashless redirects so relative refs resolve (D13).
-		mux.HandleFunc("GET /p/{slug}", h.redirectSlash)
-		mux.HandleFunc("GET /p/{slug}/{$}", h.pageIndex)
-		mux.HandleFunc("GET /p/{slug}/{rest...}", h.pageAsset)
+		handleFunc("GET /p/{slug}", h.redirectSlash)
+		handleFunc("GET /p/{slug}/{$}", h.pageIndex)
+		handleFunc("GET /p/{slug}/{rest...}", h.pageAsset)
 		// Dual-mount: /a/{slug}/* maps to the same bucket keys (D5).
-		mux.HandleFunc("GET /a/{slug}/{rest...}", h.asset)
+		handleFunc("GET /a/{slug}/{rest...}", h.asset)
 	}
 
 	// ModeAdmin mounts only the admin plane; ModeServe only the serving
@@ -86,22 +121,32 @@ func New(o Options) http.Handler {
 	// both guards and mounts everything — the documented zero-value-as-all
 	// behavior.
 	if o.Mode != config.ModeServe {
-		mux.HandleFunc("GET /{$}", h.ui)
+		handleFunc("GET /{$}", h.ui)
 		api()
 		// The browser half of the OIDC flow mounts only when the flow is
 		// actually wired (auth-modes D5): a flowless oidc checker fails
 		// closed instead of mounting nil handlers.
 		if o.Auth.HasFlow() {
-			mux.Handle("GET /login", o.Auth.Login())
-			mux.Handle("GET /auth/callback", o.Auth.Callback())
-			mux.Handle("POST /logout", o.Auth.Logout())
+			route("GET /login", o.Auth.Login())
+			route("GET /auth/callback", o.Auth.Callback())
+			route("POST /logout", o.Auth.Logout())
 		}
 	}
 	if o.Mode != config.ModeAdmin {
 		pages()
 	}
 
-	return mux
+	return h.instrument(mux)
+}
+
+// ModuleVersion reports the serving binary's module version for /healthz
+// and the boot trail (observability: build identification). Development
+// builds report "dev".
+func ModuleVersion() string {
+	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" {
+		return bi.Main.Version
+	}
+	return "dev"
 }
 
 // Cache-control policies: assets are immutable bytes cached for a year;
@@ -155,17 +200,26 @@ func StorageProbe(store storage.Storage) func(context.Context) error {
 	}
 }
 
+// healthz reports the probe outcome plus build identity (observability:
+// health responses identify the build): status codes are unchanged — 200
+// healthy, 503 unhealthy — and the body is JSON with version and uptime.
 func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
+	status := map[bool]string{true: "ok", false: "unhealthy"}
+	code := http.StatusOK
 	if h.ping != nil {
 		ctx, cancel := context.WithTimeout(r.Context(), time.Second)
 		defer cancel()
 		if err := h.ping(ctx); err != nil {
-			http.Error(w, "unhealthy", http.StatusServiceUnavailable)
-			return
+			code = http.StatusServiceUnavailable
 		}
 	}
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("ok"))
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"status":  status[code == http.StatusOK],
+		"version": h.version,
+		"uptime":  time.Since(h.startedAt).Round(time.Second).String(),
+	})
 }
 
 func (h *Handler) redirectSlash(w http.ResponseWriter, r *http.Request) {
@@ -187,14 +241,14 @@ func (h *Handler) pageIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := slug + "/index.html"
-	if e, present, stale := h.cache.lookup(slug); present {
+	if e, present, stale := h.cache.lookup(r.Context(), slug); present {
 		if !stale {
 			h.writeBytes(w, r, e.data, e.contentType, e.etag, cacheControlEntry)
 			return
 		}
 		meta, err := h.store.Stat(r.Context(), key)
 		if errors.Is(err, storage.ErrNotFound) {
-			h.cache.evict(slug)
+			h.cache.evict(r.Context(), slug)
 			h.serveError(w, r, err)
 			return
 		}
@@ -222,7 +276,7 @@ func (h *Handler) pageIndex(w http.ResponseWriter, r *http.Request) {
 		h.serveError(w, r, err)
 		return
 	}
-	h.cache.put(slug, data, obj.ContentType, obj.ETag)
+	h.cache.put(r.Context(), slug, data, obj.ContentType, obj.ETag)
 	h.writeBytes(w, r, data, obj.ContentType, obj.ETag, cacheControlEntry)
 }
 
@@ -277,7 +331,9 @@ func (h *Handler) serveError(w http.ResponseWriter, r *http.Request, err error) 
 		http.NotFound(w, r)
 		return
 	}
-	slog.Error("serve", "path", r.URL.Path, "err", err)
+	// The request-scoped logger carries request_id and route (observability
+	// D3); the fallback covers handlers invoked without the middleware.
+	httpx.Log(r.Context(), h.log).Error("serve", "path", r.URL.Path, "err", err)
 	http.Error(w, "internal error", http.StatusInternalServerError)
 }
 

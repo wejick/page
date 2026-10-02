@@ -25,7 +25,7 @@ func TestNewOIDCDiscovery(t *testing.T) {
 
 	t.Run("success", func(t *testing.T) {
 		o, err := NewOIDC(t.Context(), config.OIDC{Issuer: idp.Issuer, ClientID: "c",
-			ClientSecret: "s", RedirectURL: "https://app.test/cb"}, "secret")
+			ClientSecret: "s", RedirectURL: "https://app.test/cb"}, "secret", nil)
 		if err != nil {
 			t.Fatalf("NewOIDC: %v", err)
 		}
@@ -40,7 +40,7 @@ func TestNewOIDCDiscovery(t *testing.T) {
 		}))
 		defer doc.Close()
 		_, err := NewOIDC(t.Context(), config.OIDC{Issuer: doc.URL, ClientID: "c",
-			ClientSecret: "s", RedirectURL: "u"}, "secret")
+			ClientSecret: "s", RedirectURL: "u"}, "secret", nil)
 		if err == nil || !strings.Contains(err.Error(), "does not match") {
 			t.Fatalf("NewOIDC err = %v, want issuer mismatch", err)
 		}
@@ -48,14 +48,14 @@ func TestNewOIDCDiscovery(t *testing.T) {
 
 	t.Run("unreachable issuer fails the boot", func(t *testing.T) {
 		_, err := NewOIDC(t.Context(), config.OIDC{Issuer: "http://127.0.0.1:1", ClientID: "c",
-			ClientSecret: "s", RedirectURL: "u"}, "secret")
+			ClientSecret: "s", RedirectURL: "u"}, "secret", nil)
 		if err == nil {
 			t.Fatalf("NewOIDC err = nil, want fetch failure")
 		}
 	})
 
 	t.Run("empty session secret fails the boot", func(t *testing.T) {
-		_, err := NewOIDC(t.Context(), config.OIDC{Issuer: idp.Issuer}, "")
+		_, err := NewOIDC(t.Context(), config.OIDC{Issuer: idp.Issuer}, "", nil)
 		if err == nil {
 			t.Fatalf("NewOIDC err = nil, want empty-secret failure")
 		}
@@ -96,7 +96,7 @@ func jarClient(t *testing.T) *http.Client {
 func TestLoginFlow(t *testing.T) {
 	idp := oidctest.New(t)
 	o, err := NewOIDC(t.Context(), config.OIDC{Issuer: idp.Issuer, ClientID: idp.ClientID,
-		ClientSecret: idp.ClientSecret, RedirectURL: "https://app.test/auth/callback"}, "secret")
+		ClientSecret: idp.ClientSecret, RedirectURL: "https://app.test/auth/callback"}, "secret", nil)
 	if err != nil {
 		t.Fatalf("NewOIDC: %v", err)
 	}
@@ -204,7 +204,7 @@ func TestLogoutClearsSession(t *testing.T) {
 func TestValidateIDToken(t *testing.T) {
 	idp := oidctest.New(t)
 	o, err := NewOIDC(t.Context(), config.OIDC{Issuer: idp.Issuer, ClientID: idp.ClientID,
-		ClientSecret: idp.ClientSecret, RedirectURL: "u"}, "secret")
+		ClientSecret: idp.ClientSecret, RedirectURL: "u"}, "secret", nil)
 	if err != nil {
 		t.Fatalf("NewOIDC: %v", err)
 	}

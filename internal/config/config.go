@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -51,6 +52,13 @@ type Config struct {
 	AuthMode   AuthMode
 	AuthToken  string
 	CacheTTL   time.Duration // entry-HTML cache revalidation interval
+
+	// Logging and metrics (observability D1, D5): LOG_LEVEL gates the slog
+	// JSON handler; the OTEL endpoint enables OTLP metric export via the
+	// standard OTEL_* environment variables, unset → no exporter.
+	LogLevel     slog.Level
+	OTelEndpoint string
+	OTelProtocol string
 
 	Storage       Storage
 	OIDC          OIDC
@@ -123,6 +131,23 @@ func Load(get func(string) string) (Config, error) {
 		RedirectURL:  get("OIDC_REDIRECT_URL"),
 	}
 	cfg.CacheTTL = dur(get, "HTML_CACHE_TTL", 60*time.Second)
+
+	// Observability knobs (observability D1, D5). LOG_LEVEL validates
+	// eagerly so a typo fails boot instead of silently logging at info.
+	cfg.LogLevel = slog.LevelInfo
+	if v := get("LOG_LEVEL"); v != "" {
+		if err := cfg.LogLevel.UnmarshalText([]byte(v)); err != nil {
+			errs = append(errs, fmt.Errorf("LOG_LEVEL must be a level name (debug, info, warn, error), got %q", v))
+		}
+	}
+	cfg.OTelEndpoint = get("OTEL_EXPORTER_OTLP_ENDPOINT")
+	// Only the HTTP/protobuf exporter is wired; anything else must fail
+	// fast rather than be silently ignored.
+	cfg.OTelProtocol = get("OTEL_EXPORTER_OTLP_PROTOCOL")
+	if cfg.OTelProtocol != "" && cfg.OTelProtocol != "http/protobuf" {
+		errs = append(errs, fmt.Errorf("OTEL_EXPORTER_OTLP_PROTOCOL must be http/protobuf, got %q", cfg.OTelProtocol))
+	}
+
 	if cfg.Mode != ModeServe {
 		if cfg.SQLitePath == "" {
 			errs = append(errs, fmt.Errorf("SQLITE_PATH is required"))

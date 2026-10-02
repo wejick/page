@@ -12,7 +12,7 @@ import (
 // The bearer check must reject before the service is ever touched — a nil
 // service proves no DB/storage access happens on the unauthorized path.
 func TestAPIRejectsUnauthenticated(t *testing.T) {
-	api := NewAPI(nil, auth.NewChecker(config.AuthModeToken, "secret", nil))
+	api := NewAPI(nil, auth.NewChecker(config.AuthModeToken, "secret", nil), nil, nil)
 	srv := httptest.NewServer(api.Park())
 	defer srv.Close()
 
@@ -54,7 +54,7 @@ func TestAPIRejectsUnauthenticated(t *testing.T) {
 	}
 
 	// Traversal and empty slugs are treated as unknown pages.
-	api2 := NewAPI(nil, auth.NewChecker(config.AuthModeToken, "secret", nil))
+	api2 := NewAPI(nil, auth.NewChecker(config.AuthModeToken, "secret", nil), nil, nil)
 	srv2 := httptest.NewServer(api2.Unpark())
 	defer srv2.Close()
 	for _, slug := range []string{"..", "a%2Fb"} {

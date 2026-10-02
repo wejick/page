@@ -42,8 +42,8 @@ func start(t *testing.T) *harness {
 	}
 
 	store := mem.New()
-	svc := New(d, store)
-	return &harness{db: d, store: store, svc: svc, api: NewAPI(svc, auth.NewChecker(config.AuthModeToken, "secret", nil))}
+	svc := New(nil, d, store)
+	return &harness{db: d, store: store, svc: svc, api: NewAPI(svc, auth.NewChecker(config.AuthModeToken, "secret", nil), nil, nil)}
 }
 
 // seedPage inserts a page row (status live) and two objects.

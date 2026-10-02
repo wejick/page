@@ -32,6 +32,7 @@ type OIDC struct {
 	secret       []byte
 	client       *http.Client
 	keys         *jwksCache
+	log          *slog.Logger
 }
 
 // idpDiscovery is the slice of the discovery document the flow needs.
@@ -44,8 +45,12 @@ type idpDiscovery struct {
 
 // NewOIDC runs discovery against the configured issuer. Any failure fails
 // the boot (auth-modes D4): the same fail-fast as database and storage
-// configuration, so a misconfigured IdP never half-boots.
-func NewOIDC(ctx context.Context, cfg config.OIDC, sessionSecret string) (*OIDC, error) {
+// configuration, so a misconfigured IdP never half-boots. log may be nil →
+// slog default (observability D1).
+func NewOIDC(ctx context.Context, cfg config.OIDC, sessionSecret string, log *slog.Logger) (*OIDC, error) {
+	if log == nil {
+		log = slog.Default()
+	}
 	if sessionSecret == "" {
 		return nil, errors.New("auth: empty session secret")
 	}
@@ -82,7 +87,7 @@ func NewOIDC(ctx context.Context, cfg config.OIDC, sessionSecret string) (*OIDC,
 		issuer: cfg.Issuer, clientID: cfg.ClientID, clientSecret: cfg.ClientSecret,
 		redirectURL: cfg.RedirectURL, authURL: d.AuthURL, tokenURL: d.TokenURL,
 		secret: []byte(sessionSecret), client: client,
-		keys: newJWKS(d.JWKSURL, client),
+		keys: newJWKS(d.JWKSURL, client), log: log,
 	}, nil
 }
 
@@ -143,13 +148,13 @@ func (o *OIDC) Callback() http.Handler {
 
 		raw, err := o.exchange(r.Context(), code)
 		if err != nil {
-			slog.Error("auth", "what", "code exchange", "err", err)
+			o.log.Error("auth", "what", "code exchange", "err", err)
 			http.Error(w, "login failed", http.StatusUnauthorized)
 			return
 		}
 		claims, err := o.validateIDToken(r.Context(), raw, nonce)
 		if err != nil {
-			slog.Error("auth", "what", "id token", "err", err)
+			o.log.Error("auth", "what", "id token", "err", err)
 			http.Error(w, "login failed", http.StatusUnauthorized)
 			return
 		}

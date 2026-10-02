@@ -17,13 +17,19 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"database/sql"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/noop"
 
 	"page/internal/auth"
 	"page/internal/config"
 	"page/internal/db"
 	"page/internal/fetch"
+	"page/internal/httpx"
 	"page/internal/ingest"
 	"page/internal/slug"
 	"page/internal/storage"
@@ -37,6 +43,10 @@ type Handler struct {
 	keep  ingest.KeepRules
 	authn *auth.Checker
 	guard fetch.GuardFunc
+
+	log        *slog.Logger
+	uploadReqs metric.Int64Counter     // upload.requests: outcome
+	uploadDur  metric.Float64Histogram // upload.duration
 }
 
 // Options carries handler dependencies.
@@ -47,6 +57,8 @@ type Options struct {
 	Keep  ingest.KeepRules
 	Auth  *auth.Checker   // admin-plane authenticator (auth-modes D7)
 	Guard fetch.GuardFunc // SSRF guard for outbound fetches; nil → fetch.Standard
+	Log   *slog.Logger    // nil → slog default (observability D1)
+	Meter metric.Meter    // nil → noop (observability D5)
 }
 
 // New builds the API handler.
@@ -55,11 +67,70 @@ func New(o Options) *Handler {
 	if guard == nil {
 		guard = fetch.Standard
 	}
-	return &Handler{db: o.DB, store: o.Store, caps: o.Caps, keep: o.Keep, authn: o.Auth, guard: guard}
+	h := &Handler{db: o.DB, store: o.Store, caps: o.Caps, keep: o.Keep, authn: o.Auth, guard: guard}
+	h.log = o.Log
+	if h.log == nil {
+		h.log = slog.Default()
+	}
+	meter := o.Meter
+	if meter == nil {
+		meter = noop.NewMeterProvider().Meter("page")
+	}
+	reqs, err := meter.Int64Counter("upload.requests",
+		metric.WithDescription("Upload outcomes: created, rejected, failed"))
+	if err != nil {
+		reqs, _ = noop.NewMeterProvider().Meter("page").Int64Counter("upload.requests")
+	}
+	dur, _ := meter.Float64Histogram("upload.duration",
+		metric.WithDescription("Upload duration in seconds"),
+		metric.WithUnit("s"))
+	h.uploadReqs, h.uploadDur = reqs, dur
+	return h
 }
 
-// Create handles POST /api/pages.
-func (h *Handler) Create() http.Handler { return http.HandlerFunc(h.create) }
+// Create handles POST /api/pages: the handler wrapper captures the response
+// status to record the upload outcome metric (created | rejected | failed,
+// observability D7); the ingest path itself logs the success line.
+func (h *Handler) Create() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w}
+		h.create(rec, r)
+		outcome := "failed"
+		switch {
+		case rec.status >= 200 && rec.status < 300:
+			outcome = "created"
+		case rec.status >= 400 && rec.status < 500:
+			outcome = "rejected"
+		}
+		attrs := metric.WithAttributes(attribute.String("outcome", outcome))
+		h.uploadReqs.Add(r.Context(), 1, attrs)
+		h.uploadDur.Record(r.Context(), time.Since(start).Seconds(), attrs)
+	})
+}
+
+// statusRecorder captures the response status for the upload outcome metric.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	if r.status == 0 {
+		r.status = code
+	}
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *statusRecorder) Write(b []byte) (int, error) {
+	if r.status == 0 {
+		r.status = http.StatusOK
+	}
+	return r.ResponseWriter.Write(b)
+}
+
+// Unwrap lets http.ResponseController reach the underlying writer.
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 
 // Get handles GET /api/pages/{slug}.
 func (h *Handler) Get() http.Handler { return http.HandlerFunc(h.get) }
@@ -68,6 +139,7 @@ func (h *Handler) Get() http.Handler { return http.HandlerFunc(h.get) }
 func (h *Handler) List() http.Handler { return http.HandlerFunc(h.list) }
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	if !h.auth(w, r) {
 		return
 	}
@@ -189,7 +261,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 			unresolved := unresolvedAssets(res)
 			if len(unresolved) > 0 {
 				_ = h.store.DeletePrefix(ctx, slugStr+"/")
-				slog.Info("upload", "what", "import rejected", "slug", slugStr,
+				httpx.Log(r.Context(), h.log).Info("upload", "what", "import rejected", "slug", slugStr,
 					"unresolved", len(unresolved), "source", baseURL)
 				writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
 					"error": "import_incomplete",
@@ -233,6 +305,16 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		for _, m := range res.Manifest {
 			counts[m.Status]++
 		}
+		// One structured line for the upload happy path (observability:
+		// significant admin events emit one line).
+		httpx.Log(r.Context(), h.log).Info("upload",
+			"what", "created", "slug", slugStr,
+			"duration", time.Since(start).String(),
+			"bytes", total,
+			"assets_local", counts[ingest.StatusLocal],
+			"assets_baked", counts[ingest.StatusBaked],
+			"assets_kept_cdn", counts[ingest.StatusKeptCDN],
+			"assets_kept_external", counts[ingest.StatusKeptExternal])
 		writeJSON(w, http.StatusCreated, map[string]any{
 			"slug":       slugStr,
 			"identifier": slugIdentifier(slugStr),
@@ -327,7 +409,7 @@ func (h *Handler) auth(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func (h *Handler) fail(w http.ResponseWriter, r *http.Request, what string, err error) {
-	slog.Error("upload", "what", what, "err", err)
+	httpx.Log(r.Context(), h.log).Error("upload", "what", what, "err", err)
 	http.Error(w, "internal error", http.StatusInternalServerError)
 }
 

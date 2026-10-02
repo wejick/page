@@ -74,7 +74,7 @@ func TestCheckerNoneMode(t *testing.T) {
 func TestCheckerOIDCMode(t *testing.T) {
 	idp := oidctest.New(t)
 	o, err := NewOIDC(t.Context(), config.OIDC{Issuer: idp.Issuer, ClientID: idp.ClientID,
-		ClientSecret: idp.ClientSecret, RedirectURL: "https://app.test/auth/callback"}, "sess-secret")
+		ClientSecret: idp.ClientSecret, RedirectURL: "https://app.test/auth/callback"}, "sess-secret", nil)
 	if err != nil {
 		t.Fatalf("NewOIDC: %v", err)
 	}

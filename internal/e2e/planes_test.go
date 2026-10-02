@@ -51,10 +51,10 @@ func TestSplitPlanesServeAndAdmin(t *testing.T) {
 		},
 		Auth: tokenChecker(),
 	})
-	lc := lifecycle.New(pool, store)
+	lc := lifecycle.New(nil, pool, store)
 	adminTS := httptest.NewServer(serve.New(serve.Options{
 		Mode: config.ModeAdmin, Store: store,
-		Upload: api, Lifecycle: lifecycle.NewAPI(lc, tokenChecker()), Auth: tokenChecker(), Ping: dbPing(pool),
+		Upload: api, Lifecycle: lifecycle.NewAPI(lc, tokenChecker(), nil, nil), Auth: tokenChecker(), Ping: dbPing(pool),
 	}))
 	t.Cleanup(adminTS.Close)
 

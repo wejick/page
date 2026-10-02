@@ -37,10 +37,10 @@ func TestManagementEndToEnd(t *testing.T) {
 		Keep: ingest.KeepRules{},
 		Auth: tokenChecker(),
 	})
-	lc := lifecycle.New(pool, store)
+	lc := lifecycle.New(nil, pool, store)
 	ts := httptest.NewServer(serve.New(serve.Options{
 		Store: store, CacheTTL: 300 * time.Millisecond,
-		Upload: api, Lifecycle: lifecycle.NewAPI(lc, tokenChecker()), Auth: tokenChecker(), Ping: dbPing(pool),
+		Upload: api, Lifecycle: lifecycle.NewAPI(lc, tokenChecker(), nil, nil), Auth: tokenChecker(), Ping: dbPing(pool),
 	}))
 	t.Cleanup(ts.Close)
 

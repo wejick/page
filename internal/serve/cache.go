@@ -2,8 +2,13 @@ package serve
 
 import (
 	"container/list"
+	"context"
 	"sync"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/noop"
 )
 
 // htmlCache caches entry HTML keyed by slug (D14). Content is immutable, but
@@ -11,7 +16,8 @@ import (
 // revalidated against storage after a bounded TTL (the serve-side mirror of
 // the entry-HTML cache-header policy). Between revalidations, serving is
 // memory-only. Misses are never cached (no negative entries); the byte
-// budget is a safety valve, not a correctness mechanism.
+// budget is a safety valve, not a correctness mechanism. Hit/miss/evict are
+// recorded on the html.cache counter (observability D7).
 type htmlCache struct {
 	mu       sync.Mutex
 	maxBytes int64
@@ -19,6 +25,7 @@ type htmlCache struct {
 	ttl      time.Duration
 	ll       *list.List               // front = most recent
 	items    map[string]*list.Element // slug -> element of *cacheEntry
+	events   metric.Int64Counter      // html.cache: outcome hit|miss|evict
 }
 
 type cacheEntry struct {
@@ -34,31 +41,45 @@ const (
 	defaultCacheTTL      = 60 * time.Second
 )
 
-func newHTMLCache(maxBytes int64, ttl time.Duration) *htmlCache {
+func newHTMLCache(maxBytes int64, ttl time.Duration, m metric.Meter) *htmlCache {
 	if maxBytes <= 0 {
 		maxBytes = defaultCacheMaxBytes
 	}
 	if ttl <= 0 {
 		ttl = defaultCacheTTL
 	}
+	events, err := m.Int64Counter("html.cache",
+		metric.WithDescription("Entry-HTML cache outcomes: hit, miss, evict"))
+	if err != nil {
+		// An unusable meter must not take the cache down (observability D8).
+		events, _ = noop.NewMeterProvider().Meter("page").Int64Counter("html.cache")
+	}
 	return &htmlCache{
 		maxBytes: maxBytes,
 		ttl:      ttl,
 		ll:       list.New(),
 		items:    make(map[string]*list.Element),
+		events:   events,
 	}
+}
+
+// recordEvent adds one cache outcome observation.
+func (c *htmlCache) recordEvent(ctx context.Context, outcome string) {
+	c.events.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", outcome)))
 }
 
 // lookup returns the cached entry and whether it is present, plus whether it
 // is past its revalidation deadline (stale entries still serve the bytes —
 // the caller revalidates via Stat before trusting them).
-func (c *htmlCache) lookup(slug string) (e cacheEntry, present, stale bool) {
+func (c *htmlCache) lookup(ctx context.Context, slug string) (e cacheEntry, present, stale bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	el, ok := c.items[slug]
 	if !ok {
+		c.recordEvent(ctx, "miss")
 		return cacheEntry{}, false, false
 	}
+	c.recordEvent(ctx, "hit")
 	c.ll.MoveToFront(el)
 	ce := el.Value.(*cacheEntry)
 	return cacheEntry{data: ce.data, contentType: ce.contentType, etag: ce.etag},
@@ -75,7 +96,7 @@ func (c *htmlCache) touch(slug string) {
 }
 
 // evict drops an entry whose revalidation proved it gone (parked/removed).
-func (c *htmlCache) evict(slug string) {
+func (c *htmlCache) evict(ctx context.Context, slug string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if el, ok := c.items[slug]; ok {
@@ -83,10 +104,11 @@ func (c *htmlCache) evict(slug string) {
 		c.ll.Remove(el)
 		delete(c.items, slug)
 		c.curBytes -= int64(len(ce.data))
+		c.recordEvent(ctx, "evict")
 	}
 }
 
-func (c *htmlCache) put(slug string, data []byte, contentType, etag string) {
+func (c *htmlCache) put(ctx context.Context, slug string, data []byte, contentType, etag string) {
 	size := int64(len(data))
 	if size > c.maxBytes {
 		return // single entry exceeds budget: never cache it
@@ -115,5 +137,6 @@ func (c *htmlCache) put(slug string, data []byte, contentType, etag string) {
 		c.ll.Remove(oldest)
 		delete(c.items, oe.slug)
 		c.curBytes -= int64(len(oe.data))
+		c.recordEvent(ctx, "evict")
 	}
 }
