@@ -4,660 +4,244 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Static pages — manage</title>
-<style>
-  /* Light theme is pinned (D1): the palette below is hardcoded light, so a
-     dark-canvas browser would otherwise render a half-dark page. */
-  :root {
-    color-scheme: light;
-    --accent: #2563eb;
-    --accent-hover: #1d4ed8;
-    --bg: #ffffff;
-    --text: #1c1e21;
-    --muted: #555b63;
-    --border: #e3e5e8;
-    --border-strong: #c3c8cf;
-    --hover: #f4f6f8;
-    --focus: #2563eb;
-    --ok-bg: #e4f3e6; --ok-border: #3a7d3a; --ok-text: #1d5620;
-    --neutral-bg: #ecedee; --neutral-border: #9ba1a8; --neutral-text: #494f56;
-    --warn-bg: #fdf1d7; --warn-border: #b8860b; --warn-text: #7a5a07;
-    --err-bg: #fbe9e9; --err-text: #7a1f16;
-  }
-  body { font-family: -apple-system, system-ui, sans-serif; max-width: 960px;
-         margin: 2rem auto; padding: 0 1rem;
-         background: var(--bg); color: var(--text); }
-  h1 { font-size: 1.2rem; display: inline; }
-  h1 a { text-decoration: none; color: inherit; }
-  a { color: var(--accent); }
-  a:visited { color: var(--accent); }
-  a:hover { color: var(--accent-hover); }
-  header { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
-           margin-bottom: .75rem; }
-  header .spacer { flex: 1; }
-  .btn { display: inline-block; padding: .35rem .9rem; font-size: .95rem;
-         cursor: pointer; border: 1px solid var(--border-strong);
-         border-radius: 6px; background: transparent; color: inherit;
-         text-decoration: none; }
-  .btn:hover { background: var(--hover); }
-  .btn:active { background: var(--border); }
-  .btn.danger { border-color: #c0392b; color: #c0392b; }
-  .btn.danger:hover { background: var(--err-bg); }
-  .btn.primary { background: var(--accent); border-color: var(--accent);
-                 color: #fff; font-weight: 600; }
-  .btn.primary:hover:not(:disabled) { background: var(--accent-hover); }
-  #go { margin-top: 1.25rem; width: 100%; font-size: 1rem; padding: .6rem; }
-  button:disabled { opacity: .45; cursor: not-allowed; }
-  :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
-  .chip { padding: .25rem .7rem; font-size: .85rem; border-radius: 99px;
-          border: 1px solid var(--border-strong); background: transparent;
-          color: var(--muted); cursor: pointer; }
-  .chip:hover { background: var(--hover); }
-  .chip.warn { border-color: var(--warn-border); color: var(--warn-text);
-               background: var(--warn-bg); }
-  #authrow { margin: .4rem 0 1rem; font-size: .9rem; }
-  #authrow input { width: 22rem; max-width: 60vw; padding: .3rem; }
-  #authmsg { color: var(--err-text); margin-left: .5rem; }
-  #flash { margin: .5rem 0; padding: .6rem 1rem; border-radius: 6px;
-           background: var(--err-bg); color: var(--err-text); display: none; }
-  .tablewrap { overflow-x: auto; }
-  table { border-collapse: collapse; width: 100%; font-size: .93rem; }
-  th, td { text-align: left; padding: .45rem .6rem; border-bottom: 1px solid var(--border); }
-  tbody tr:hover { background: var(--hover); }
-  td.num, th.num { text-align: right; }
-  td.actions { text-align: right; white-space: nowrap; }
-  td.actions .btn { margin-left: .35rem; }
-  .badge { display: inline-block; padding: .1rem .55rem; border-radius: 99px;
-           font-size: .8rem; border: 1px solid var(--neutral-border);
-           color: var(--neutral-text); }
-  .badge.live { background: var(--ok-bg); border-color: var(--ok-border);
-                color: var(--ok-text); }
-  .badge.parked, .badge.kept-cdn { background: var(--neutral-bg);
-                border-color: var(--neutral-border); color: var(--neutral-text); }
-  /* transient lifecycle states and kept-external share the warning family:
-     both mean "in motion or at risk", everything else is settled (D3) */
-  .badge.transient, .badge.kept-external { background: var(--warn-bg);
-                border-color: var(--warn-border); color: var(--warn-text); }
-  .muted { color: var(--muted); font-size: .85rem; }
-  .note { margin: .5rem 0; padding: .5rem .8rem; border-radius: 6px;
-          background: var(--warn-bg); color: var(--warn-text); font-size: .9rem; }
-  .err { background: var(--err-bg); }
-  .ok { background: var(--ok-bg); }
-  #result { margin-top: 1.25rem; padding: 1rem; border-radius: 6px; display: none; }
-  #result .sum { margin-top: .5rem; }
-  #result .sum.warn { color: var(--warn-text); }
-  label { display: block; margin: 1rem 0 .3rem; font-weight: 600; }
-  input[type=text], select { padding: .5rem .7rem; border: 2px solid #99a3af;
-                             border-radius: 6px; box-sizing: border-box; }
-  .unresolved { margin: .6rem 0 0; padding-left: 1.25rem;
-                word-break: break-all; text-align: left; }
-  /* One-surface source card (one-surface-upload-ui D1): drop layer on top,
-     URL input as the footer. The URL input is a DOM sibling of the file
-     label, not a child — a label forwards clicks to its target, so nesting
-     would open the file picker on every click into the URL field (D3). */
-  .srccard { border: 1px solid var(--border-strong); border-radius: 10px;
-             overflow: hidden; background: var(--bg);
-             box-shadow: 0 1px 3px rgba(0,0,0,.06); }
-  .srccard .drop { display: block; padding: 3rem 1rem; text-align: center;
-                   cursor: pointer; background: var(--hover); }
-  .srccard .drop.over { background: #eef4ff;
-                        box-shadow: inset 0 0 0 2px var(--accent); }
-  .srccard .drop:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
-  .srccard .drop .icon { font-size: 2rem; margin-bottom: .5rem; }
-  .srccard .drop .big { font-weight: 700; font-size: 1.05rem; }
-  .srccard .drop .sub { color: var(--muted); margin-top: .3rem; font-size: .9rem; }
-  .srccard .footer { border-top: 1px solid var(--border); padding: .8rem 1rem; }
-  .srccard .footer.dimmed { background: var(--hover); }
-  .srccard .row { display: flex; align-items: center; gap: .5rem; }
-  .srccard .row .link { font-size: 1.05rem; }
-  .srccard .row input { flex: 1; }
-  /* The summary chip always shows the one source Publish will send
-     (one-surface-upload-ui D2). */
-  .source { display: flex; align-items: center; gap: .6rem;
-            padding: .7rem .9rem; border: 1px solid var(--ok-border);
-            background: var(--ok-bg); color: var(--ok-text);
-            border-radius: 8px; font-size: .95rem; text-align: left; }
-  .source .name { font-weight: 600; word-break: break-all; }
-  .source .size { color: var(--muted); font-weight: normal; white-space: nowrap; }
-  .source .clear { margin-left: auto; border: none; background: none;
-                   cursor: pointer; color: inherit; font-size: 1rem;
-                   padding: .1rem .4rem; border-radius: 4px; }
-  .source .clear:hover { background: rgba(0,0,0,.08); }
-  .below { margin-top: 1.25rem; }
-  .below input[type=text] { width: 100%; }
-  .preview { margin-top: .4rem; font-size: .85rem; color: var(--muted); }
-  .preview code { background: var(--hover); padding: .1rem .4rem;
-                  border-radius: 4px; color: var(--text); }
-  .preview .warn { color: var(--warn-text); }
-  .ferr { margin-top: .35rem; font-size: .85rem; color: var(--err-text); }
-  .visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px;
-                     overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
-  nav.pager { margin-top: .8rem; display: flex; gap: .75rem; align-items: center; }
-  dl.meta { display: grid; grid-template-columns: max-content 1fr; gap: .25rem 1.25rem; }
-  dl.meta dt { color: var(--muted); }
-  dl.meta dd { margin: 0; }
-</style>
+<link rel="stylesheet" href="/ui/app.css">
+<!-- app.js registers the page component on alpine:init, so it must load
+     before Alpine itself (harden-admin-ui D1/D2). -->
+<script defer src="/ui/app.js"></script>
+<script defer src="/ui/alpine.csp-3.17.4.min.js"></script>
 </head>
-<body data-auth-mode="token">
+<body x-data="page" data-auth-mode="token">
 <header>
   <h1><a href="#/">Static pages</a></h1>
   <span class="spacer"></span>
-  <button id="tokenchip" class="chip" type="button"></button>
+  <button id="themebtn" class="chip" type="button" @click="cycleTheme"
+          x-text="themeLabel" aria-label="Toggle color theme"></button>
+  <!-- Token entry is collapsed to a header chip; the input row only opens
+       on demand or when auth actually fails (polish-admin-ui D5). The chip
+       exists only in token mode: none mode needs no credentials, and oidc
+       mode's browser flow redirects to /login instead (auth-modes D8). -->
+  <button id="tokenchip" class="chip" type="button" x-show="showChip"
+          :class="{ warn: !tokenSet }" @click="toggleAuth"
+          x-text="chipLabel"></button>
   <a class="btn" href="#/upload">+ Upload</a>
 </header>
 
-<div id="authrow" hidden>
-  <label for="token" style="display:inline">API token</label>
-  <input type="text" id="token" placeholder="bearer token" autocomplete="off">
-  <span id="authmsg"></span>
+<div id="authrow" x-show="showAuth" x-cloak>
+  <label for="token">API token</label>
+  <input type="text" id="token" placeholder="bearer token" autocomplete="off"
+         :value="tokenInput" @input="onTokenInput">
+  <span id="authmsg" x-text="authMsg"></span>
 </div>
-<div id="flash"></div>
-<main id="view"></main>
+<div id="flash" x-show="flashMsg" x-text="flashMsg" x-cloak></div>
+<main id="view" x-cloak>
 
-<script>
-const $ = (id) => document.getElementById(id);
-const view = $("view");
-const PAGE_SIZE = 50;
-const TRANSIENT = new Set(["parking", "unparking", "deleting"]);
-let listState = { offset: 0, status: "" };
-
-// Token entry is collapsed to a header chip; the input row only opens on
-// demand or when auth actually fails (D5). The chip exists only in token
-// mode: none mode needs no credentials, and oidc mode's browser flow
-// redirects to /login instead (auth-modes D8).
-const AUTH_MODE = document.body.dataset.authMode || "token";
-let authRequired = false;
-const chip = $("tokenchip");
-function syncAuthChip() {
-  const has = !!localStorage.getItem("sp-token");
-  chip.textContent = has ? "Token set" : "No token";
-  chip.classList.toggle("warn", !has);
-}
-function expandAuth(open) {
-  $("authrow").hidden = !open;
-  if (open) $("token").focus();
-}
-if (AUTH_MODE === "token") {
-  chip.onclick = () => expandAuth($("authrow").hidden);
-  $("token").value = localStorage.getItem("sp-token") || "";
-  syncAuthChip();
-  expandAuth(!$("token").value.trim());
-  $("token").oninput = () => {
-    localStorage.setItem("sp-token", $("token").value.trim());
-    syncAuthChip();
-    setAuthMsg("");
-    // After a 401 sent us here, entering a token re-loads the current view
-    // so the user isn't left staring at the empty page that prompted them.
-    // authRequired stays set: the first successful call clears it and
-    // collapses the entry; another 401 keeps it open with the message.
-    if (authRequired && $("token").value.trim()) {
-      route();
-    }
-  };
-} else {
-  chip.hidden = true;
-}
-
-function setAuthMsg(msg) { $("authmsg").textContent = msg; }
-function flash(msg) {
-  const el = $("flash");
-  el.textContent = msg;
-  el.style.display = msg ? "block" : "none";
-}
-function esc(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-  }[c]));
-}
-function fmtBytes(n) {
-  if (n < 1024) return n + " B";
-  if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
-  return (n / 1048576).toFixed(1) + " MB";
-}
-function fmtTime(iso) { return new Date(iso).toLocaleString(); }
-
-const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
-function fmtRel(iso) {
-  const secs = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
-  if (secs < 45) return "just now";
-  const steps = [[31536000, "year"], [2592000, "month"], [604800, "week"],
-                 [86400, "day"], [3600, "hour"], [60, "minute"]];
-  for (const [limit, unit] of steps) {
-    if (secs >= limit) return rtf.format(-Math.round(secs / limit), unit);
-  }
-  return rtf.format(-1, "minute");
-}
-// relTime renders the relative duration with the absolute datetime as the
-// hover tooltip; times go stale on a long-lived view but every mutation
-// re-renders (D6).
-function relTime(iso) {
-  return `<span title="${esc(fmtTime(iso))}">${esc(fmtRel(iso))}</span>`;
-}
-
-// api issues the request with the stored token (token mode) or the session
-// cookie (oidc mode), always carrying the CSRF header the oidc mode's
-// state-changing rules require. A 401 opens the token entry in token mode
-// and navigates to /login in oidc mode.
-async function api(path, opts = {}) {
-  const headers = Object.assign({ "X-Requested-With": "page-ui" }, opts.headers || {});
-  const tok = localStorage.getItem("sp-token");
-  if (tok) headers["Authorization"] = "Bearer " + tok;
-  const res = await fetch(path, Object.assign({}, opts, { headers }));
-  if (res.status === 401) {
-    if (AUTH_MODE === "oidc") {
-      location.href = "/login";
-      throw new Error("unauthorized");
-    }
-    authRequired = true;
-    expandAuth(true);
-    setAuthMsg("A valid API token is required.");
-    throw new Error("unauthorized");
-  }
-  if (authRequired) {
-    authRequired = false;
-    expandAuth(false);
-    setAuthMsg("");
-  }
-  return res;
-}
-
-async function errText(res) {
-  const body = await res.text();
-  try { return JSON.parse(body).error || body || res.statusText; }
-  catch { return body || res.statusText; }
-}
-
-function badge(status) {
-  const cls = TRANSIENT.has(status) ? "transient" : status;
-  const suffix = TRANSIENT.has(status) ? "…" : "";
-  return `<span class="badge ${cls}">${esc(status)}${suffix}</span>`;
-}
-
-// actionRow renders the park/unpark/delete buttons for a settled page; a page
-// mid-transition shows no actions (nothing can run while it moves). Delete
-// always lands back on the list — the deleted page has no detail to stay on.
-function actionRow(p) {
-  if (TRANSIENT.has(p.status)) return "";
-  const slug = esc(p.slug);
-  const parkBtn = p.status === "live"
-    ? `<button class="btn" data-act="park" data-slug="${slug}">Park</button>` : "";
-  const unparkBtn = p.status === "parked"
-    ? `<button class="btn" data-act="unpark" data-slug="${slug}">Unpark</button>` : "";
-  const delBtn = `<button class="btn danger" data-act="delete" data-slug="${slug}">Delete</button>`;
-  return parkBtn + unparkBtn + delBtn;
-}
-
-// bindActions wires the data-act buttons inside el. Park/unpark refresh the
-// view from the API response; delete confirms first, then navigates per
-// data-after. Conflicts (409) surface their message instead of failing mute.
-function bindActions(el, refresh) {
-  el.querySelectorAll("button[data-act]").forEach((btn) => {
-    btn.onclick = async () => {
-      const slug = btn.dataset.slug;
-      const act = btn.dataset.act;
-      flash("");
-      btn.disabled = true;
-      try {
-        if (act === "delete") {
-          if (!confirm(`Delete ${slug} permanently? Its pages, assets and metadata are removed.`)) {
-            btn.disabled = false;
-            return;
-          }
-          const res = await api("/api/pages/" + encodeURIComponent(slug), { method: "DELETE" });
-          if (!res.ok) throw new Error(await errText(res));
-          // Same-hash assignment doesn't fire hashchange: only navigate
-          // when it actually changes, else re-render in place.
-          if (location.hash === "#/" || location.hash === "") route();
-          else location.hash = "#/";
-          return;
-        }
-        const res = await api(`/api/pages/${encodeURIComponent(slug)}/${act}`, { method: "POST" });
-        if (!res.ok) throw new Error(await errText(res));
-        await refresh();
-      } catch (e) {
-        flash("Error: " + e.message);
-        btn.disabled = false;
-      }
-    };
-  });
-}
-
-async function renderList() {
-  view.innerHTML = "<p class='muted'>Loading…</p>";
-  const q = new URLSearchParams({ limit: PAGE_SIZE });
-  if (listState.offset) q.set("offset", listState.offset);
-  if (listState.status) q.set("status", listState.status);
-  let data;
-  try {
-    const res = await api("/api/pages?" + q.toString());
-    if (!res.ok) throw new Error(await errText(res));
-    data = await res.json();
-    setAuthMsg("");
-  } catch (e) {
-    if (e.message === "unauthorized") { view.innerHTML = ""; return; }
-    view.innerHTML = `<p class="err">Could not load pages: ${esc(e.message)}</p>`;
-    return;
-  }
-
-  // The identifier only repeats what the slug already says in the common
-  // case — show it when it differs.
-  const rows = data.pages.map((p) => `
-    <tr>
-      <td><a href="#/p/${esc(encodeURIComponent(p.slug))}">${esc(p.slug)}</a>
-          ${p.identifier !== p.slug ? `<div class="muted">${esc(p.identifier)}</div>` : ""}</td>
-      <td>${badge(p.status)}</td>
-      <td class="num">${fmtBytes(p.total_bytes)}</td>
-      <td class="num">${p.asset_count}</td>
-      <td>${relTime(p.created_at)}</td>
-      <td class="actions">
-        ${p.status === "live" ? `<a class="btn" href="${esc(p.url)}" target="_blank">Open</a>` : ""}
-        ${actionRow(p)}
-      </td>
-    </tr>`).join("");
-
-  const from = data.total === 0 ? 0 : listState.offset + 1;
-  const to = Math.min(listState.offset + PAGE_SIZE, data.total);
-  const emptyRow = listState.status
-    ? `<tr><td colspan="6" class="muted">No pages with this status.</td></tr>`
-    : `<tr><td colspan="6"><a class="btn" href="#/upload">+ Upload your first page</a></td></tr>`;
-  view.innerHTML = `
-    <p>
-      <label for="statusfilter" style="display:inline">Status</label>
-      <select id="statusfilter">
-        ${["", "live", "parked", "parking", "unparking", "deleting"].map((s) =>
-          `<option value="${s}" ${s === listState.status ? "selected" : ""}>${s || "all"}</option>`).join("")}
+<template x-if="route === 'list'">
+  <div>
+    <p class="listhead">
+      <label for="statusfilter">Status</label>
+      <select id="statusfilter" @change="onStatusChange">
+        <option value="">all</option>
+        <option value="live">live</option>
+        <option value="parked">parked</option>
+        <option value="parking">parking</option>
+        <option value="unparking">unparking</option>
+        <option value="deleting">deleting</option>
       </select>
     </p>
-    <div class="tablewrap">
-    <table>
-      <thead><tr><th>Page</th><th>Status</th><th class="num">Size</th>
-        <th class="num">Assets</th><th>Created</th><th></th></tr></thead>
-      <tbody>${rows || emptyRow}</tbody>
-    </table>
-    </div>
-    <nav class="pager">
-      <button class="btn" id="prev" ${listState.offset === 0 ? "disabled" : ""}>‹ Prev</button>
-      <button class="btn" id="next" ${to >= data.total ? "disabled" : ""}>Next ›</button>
-      <span class="muted">Showing ${from}–${to} of ${data.total}</span>
-    </nav>`;
+    <p class="muted" x-show="listLoading">Loading…</p>
+    <p class="err" x-show="listError" x-text="listError"></p>
+    <template x-if="listLoaded && !listError">
+      <div>
+        <div class="tablewrap">
+        <table>
+          <thead><tr><th>Page</th><th>Status</th><th class="num">Size</th>
+            <th class="num">Assets</th><th>Created</th><th></th></tr></thead>
+          <tbody>
+            <template x-for="p in listPages" :key="p.slug">
+              <tr>
+                <td><a :href="p.listHref" x-text="p.slug"></a>
+                    <div class="muted" x-show="p.identShown" x-text="p.identifier"></div></td>
+                <td><span :class="p.badgeClass" x-text="p.badgeLabel"></span></td>
+                <td class="num" x-text="p.size"></td>
+                <td class="num" x-text="p.assetCount"></td>
+                <!-- relTime renders the relative duration with the absolute
+                     datetime as the hover tooltip; times go stale on a
+                     long-lived view but every mutation re-renders (D6). -->
+                <td><span :title="p.abs" x-text="p.rel"></span></td>
+                <td class="actions">
+                  <a class="btn" x-show="p.canOpen" :href="p.url" target="_blank">Open</a>
+                  <button class="btn" x-show="p.canPark" :disabled="p.busy"
+                          @click="pageAction(p, 'park')">Park</button>
+                  <button class="btn" x-show="p.canUnpark" :disabled="p.busy"
+                          @click="pageAction(p, 'unpark')">Unpark</button>
+                  <button class="btn danger" x-show="p.canDelete" :disabled="p.busy"
+                          @click="pageAction(p, 'delete')">Delete</button>
+                </td>
+              </tr>
+            </template>
+            <tr x-show="listEmptyFiltered">
+              <td colspan="6" class="muted">No pages with this status.</td></tr>
+            <tr x-show="listEmptyAll">
+              <td colspan="6"><a class="btn" href="#/upload">+ Upload your first page</a></td></tr>
+          </tbody>
+        </table>
+        </div>
+        <nav class="pager">
+          <button class="btn" :disabled="prevDisabled" @click="prevPage">‹ Prev</button>
+          <button class="btn" :disabled="nextDisabled" @click="nextPage">Next ›</button>
+          <span class="muted" x-text="listRange"></span>
+        </nav>
+      </div>
+    </template>
+  </div>
+</template>
 
-  $("statusfilter").onchange = (e) => {
-    listState = { offset: 0, status: e.target.value };
-    renderList();
-  };
-  $("prev").onclick = () => { listState.offset = Math.max(0, listState.offset - PAGE_SIZE); renderList(); };
-  $("next").onclick = () => { listState.offset += PAGE_SIZE; renderList(); };
-  bindActions(view, renderList);
-}
+<template x-if="route === 'detail'">
+  <div>
+    <p class="muted" x-show="detailLoading">Loading…</p>
+    <template x-if="detailError">
+      <div>
+        <p class="err" x-text="detailError"></p>
+        <p><a href="#/">← Back to list</a></p>
+      </div>
+    </template>
+    <template x-if="detail">
+      <div>
+        <p><a href="#/">← Back to list</a></p>
+        <h2 class="detail-title" x-text="detail.slug"></h2>
+        <p>
+          <span :class="detail.badgeClass" x-text="detail.badgeLabel"></span>
+          <span x-show="detail.canOpen"> ·
+            <a :href="detail.url" target="_blank" x-text="detail.openLabel"></a></span>
+          <span x-show="detail.parked"> · page is parked and not being served</span>
+        </p>
+        <dl class="meta">
+          <dt>Identifier</dt><dd x-text="detail.identifier"></dd>
+          <dt>Created</dt><dd><span :title="detail.createdAbs" x-text="detail.createdRel"></span></dd>
+          <dt>Total size</dt><dd x-text="detail.sizeLine"></dd>
+        </dl>
+        <p>
+          <button class="btn" x-show="detail.canPark" :disabled="detail.busy"
+                  @click="pageAction(detail, 'park')">Park</button>
+          <button class="btn" x-show="detail.canUnpark" :disabled="detail.busy"
+                  @click="pageAction(detail, 'unpark')">Unpark</button>
+          <button class="btn danger" x-show="detail.canDelete" :disabled="detail.busy"
+                  @click="pageAction(detail, 'delete')">Delete</button>
+          <span class="muted" x-show="detail.isTransient">A transition is in progress for this page.</span>
+        </p>
+        <h3>Manifest</h3>
+        <div class="tablewrap">
+        <table>
+          <thead><tr><th>Path</th><th>Storage</th><th>Type</th><th class="num">Size</th><th>Source</th></tr></thead>
+          <tbody>
+            <template x-for="a in detail.assets" :key="a.path">
+              <tr>
+                <td x-text="a.path"></td>
+                <td><span :class="a.badgeClass" x-text="a.badgeLabel"></span></td>
+                <td x-text="a.contentType"></td>
+                <td class="num" x-text="a.size"></td>
+                <td class="muted" x-text="a.sourceURL"></td>
+              </tr>
+            </template>
+            <tr x-show="!detail.assets.length">
+              <td colspan="5" class="muted">No assets.</td></tr>
+          </tbody>
+        </table>
+        </div>
+        <!-- kept-external is the accepted-compromise status: it must read as
+             a risk, not as a settled state (D3). -->
+        <p class="note" x-show="detail.note" x-text="detail.note"></p>
+      </div>
+    </template>
+  </div>
+</template>
 
-async function renderDetail(slug) {
-  view.innerHTML = "<p class='muted'>Loading…</p>";
-  let data;
-  try {
-    const res = await api("/api/pages/" + encodeURIComponent(slug));
-    if (!res.ok) throw new Error(await errText(res));
-    data = await res.json();
-    setAuthMsg("");
-  } catch (e) {
-    if (e.message === "unauthorized") { view.innerHTML = ""; return; }
-    view.innerHTML = `<p class="err">Could not load ${esc(slug)}: ${esc(e.message)}</p>
-      <p><a href="#/">← Back to list</a></p>`;
-    return;
-  }
-
-  // kept-external is the accepted-compromise status: it must read as a risk,
-  // not as a settled state (D3). Unstored assets report 0 bytes — an em dash
-  // instead of a misleading "0 B".
-  const assets = (data.assets || []).map((a) => `
-    <tr>
-      <td>${esc(a.path)}</td>
-      <td>${badge(a.status)}</td>
-      <td>${esc(a.content_type)}</td>
-      <td class="num">${a.bytes > 0 ? fmtBytes(a.bytes) : "—"}</td>
-      <td class="muted">${esc(a.source_url)}</td>
-    </tr>`).join("");
-  const externals = (data.assets || []).filter((a) => a.status === "kept-external").length;
-  const note = externals
-    ? `<p class="note">${externals} asset${externals > 1 ? "s" : ""} still load${externals > 1 ? "" : "s"} from the original site and may break or leak requests.</p>`
-    : "";
-
-  view.innerHTML = `
-    <p><a href="#/">← Back to list</a></p>
-    <h2 style="margin-bottom:.25rem">${esc(data.slug)}</h2>
-    <p>${badge(data.status)}
-       ${data.status === "live" ? ` · <a href="${esc(data.url)}" target="_blank">open ${esc(data.url)}</a>` : ""}
-       ${data.status === "parked" ? " · page is parked and not being served" : ""}</p>
-    <dl class="meta">
-      <dt>Identifier</dt><dd>${esc(data.identifier)}</dd>
-      <dt>Created</dt><dd>${relTime(data.created_at)}</dd>
-      <dt>Total size</dt><dd>${fmtBytes(data.total_bytes)} across ${data.asset_count} assets</dd>
-    </dl>
-    <p>${actionRow(data) || "<span class='muted'>A transition is in progress for this page.</span>"}</p>
-    <h3>Manifest</h3>
-    <div class="tablewrap">
-    <table>
-      <thead><tr><th>Path</th><th>Storage</th><th>Type</th><th class="num">Size</th><th>Source</th></tr></thead>
-      <tbody>${assets || `<tr><td colspan="5" class="muted">No assets.</td></tr>`}</tbody>
-    </table>
-    </div>
-    ${note}`;
-
-  bindActions(view, () => renderDetail(slug));
-}
-
-// The upload view is one source card (one-surface-upload-ui D1): a drop
-// layer spanning the card and a URL footer, with last-action-wins selection
-// (D2) — the card always shows the single source Publish sends, so the
-// "not both" error state is unreachable and the server's 422 stays as the
-// backstop.
-function renderUpload() {
-  view.innerHTML = `
+<template x-if="route === 'upload'">
+  <div>
     <h2>Publish new page</h2>
-    <div class="srccard" id="zone">
-      <label class="drop" id="droplayer" for="file">
-        <input type="file" id="file" class="visually-hidden" accept=".html,.htm,.zip">
-        <div class="dropcontent" id="dropcontent"></div>
+    <!-- One-surface source card (one-surface-upload-ui D1): a drop layer
+         spanning the card and a URL footer, with last-action-wins selection
+         (D2) — the card always shows the single source Publish sends, so
+         the "not both" error state is unreachable and the server's 422
+         stays as the backstop. The drop handler covers the whole card, so
+         a file dropped on the URL input area still lands as the file
+         source (D3). -->
+    <div class="srccard" @dragenter.prevent="dragOver = true"
+         @dragover.prevent @dragleave.prevent="dragOver = false"
+         @drop.prevent="onDrop($event)">
+      <label class="drop" :class="dropClass" for="file">
+        <input type="file" id="file" class="visually-hidden"
+               accept=".html,.htm,.zip" @change="onFilePicked">
+        <template x-if="!hasSource">
+          <div class="dropempty">
+            <div class="icon">📄</div>
+            <div class="big">Drop your page here</div>
+            <div class="sub">an HTML file or a zip pack — or click to browse</div>
+          </div>
+        </template>
+        <template x-if="hasSource">
+          <div class="source">
+            <span>✓</span>
+            <span class="name" x-text="srcName"></span>
+            <span class="size" x-show="srcSize" x-text="srcSize"></span>
+            <button class="clear" type="button" title="clear"
+                    @click="clearSource">✕</button>
+          </div>
+        </template>
       </label>
-      <div class="footer" id="srcfooter">
+      <div class="footer" :class="footerClass">
         <div class="row">
           <span class="link">🔗</span>
-          <input type="text" id="srcurl" placeholder="or paste a link…" autocomplete="off">
+          <input type="text" id="srcurl" placeholder="or paste a link…"
+                 autocomplete="off" :value="urlInput" @input="onURLInput">
         </div>
       </div>
     </div>
     <div class="below">
       <label for="identifier">Identifier</label>
-      <input type="text" id="identifier" placeholder="landing-page" autocomplete="off">
-      <div class="preview" id="ident-preview"></div>
-      <div class="ferr" id="ident-err" hidden>Identifier is required.</div>
-      <button id="go" class="btn primary">Publish</button>
+      <input type="text" id="identifier" placeholder="landing-page"
+             autocomplete="off" :value="ident" @input="onIdentInput">
+      <div class="preview">
+        <span class="warn" x-show="identReservedMsg" x-text="identReservedMsg"></span>
+        <span x-show="identPreviewURL">will be published at
+          <code x-text="identPreviewURL"></code></span>
+      </div>
+      <div class="ferr" x-show="identError">Identifier is required.</div>
+      <button id="go" class="btn primary" :disabled="publishing"
+              @click="publish" x-text="publishLabel">Publish</button>
     </div>
-    <div id="result"></div>`;
+    <template x-if="result">
+      <div class="resultbox" :class="result.ok ? 'ok' : 'err'">
+        <template x-if="result.ok">
+          <div>
+            Published: <a :href="result.url" target="_blank" x-text="result.slug"></a>
+            — <a :href="result.detailHref">details</a>
+            <!-- The 201 response carries the ingest counts (upload.go);
+                 surface them here so kept-external doesn't hide until
+                 someone opens the detail view (D8). -->
+            <div class="sum" :class="{ warn: result.summaryWarn }"
+                 x-show="result.summary">Assets: <span x-text="result.summary"></span></div>
+          </div>
+        </template>
+        <template x-if="!result.ok">
+          <div>
+            <span x-text="result.message"></span>
+            <!-- The strict gate: show which assets failed and the way out
+                 (import-by-url D5). -->
+            <template x-if="result.incomplete">
+              <ul class="unresolved">
+                <template x-for="u in result.unresolved" :key="u.url">
+                  <li><code x-text="u.url"></code> — <span x-text="u.reason"></span></li>
+                </template>
+              </ul>
+            </template>
+          </div>
+        </template>
+      </div>
+    </template>
+  </div>
+</template>
 
-  const result = $("result");
-  const zone = $("zone");
-  const droplayer = $("droplayer");
-  let source = { type: null }; // null | {type:"file", f} | {type:"url", v}
-
-  // Client-side extension check is a hint, not the validator — the server
-  // decides. A rejected file never reaches a request (D7).
-  const validName = (f) => /\.(html|htm|zip)$/i.test(f.name);
-
-  // The preview mirrors slug.Sanitize and the reserved set so it shows the
-  // real final URL shape; it is never authoritative — the server
-  // re-validates (one-surface-upload-ui D4).
-  const RESERVED = new Set(["api", "a", "p", "ui", "www", "assets", "cdn", "static", "healthz"]);
-  const sanitizeIdent = (s) => {
-    s = s.trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-")
-         .replace(/-{2,}/g, "-").replace(/^-+|-+$/g, "");
-    return s.length > 64 ? s.slice(0, 64).replace(/-+$/, "") : s;
-  };
-  function updateIdentPreview() {
-    const s = sanitizeIdent($("identifier").value);
-    const pv = $("ident-preview");
-    $("ident-err").hidden = true;
-    if (!s) { pv.innerHTML = ""; return; }
-    if (RESERVED.has(s)) {
-      pv.innerHTML = `<span class="warn">"${esc(s)}" is reserved — pick another</span>`;
-      return;
-    }
-    // A first publish for an identifier always gets code 1; later codes are
-    // server-side state the UI cannot know, and the result corrects it (D5).
-    pv.innerHTML = `will be published at <code>/p/${esc(s)}-1</code>`;
-  }
-  function requireIdent() {
-    const s = sanitizeIdent($("identifier").value);
-    if (!s) {
-      $("ident-err").hidden = false;
-      $("identifier").focus();
-      return null;
-    }
-    if (RESERVED.has(s)) {
-      // the preview line already carries the reserved warning; block + focus
-      $("identifier").focus();
-      return null;
-    }
-    $("ident-err").hidden = true;
-    return s;
-  }
-
-  // Only #dropcontent is rebuilt on state changes; the label and the file
-  // input above it stay in the DOM, so their bindings survive every swap.
-  function renderSource() {
-    if (source.type === null) {
-      droplayer.classList.remove("filled");
-      $("dropcontent").innerHTML = `
-        <div class="icon">📄</div>
-        <div class="big">Drop your page here</div>
-        <div class="sub">an HTML file or a zip pack — or click to browse</div>`;
-      $("srcfooter").classList.add("dimmed");
-    } else {
-      droplayer.classList.add("filled");
-      const name = esc(source.type === "file" ? source.f.name : source.v);
-      const size = source.type === "file" ? `<span class="size">${fmtBytes(source.f.size)}</span>` : "";
-      $("dropcontent").innerHTML = `
-        <div class="source"><span>✓</span><span class="name">${name}</span>${size}
-          <button class="clear" id="srcclear" type="button" title="clear">✕</button></div>`;
-      $("srcfooter").classList.remove("dimmed");
-      $("srcclear").onclick = clearSource;
-    }
-  }
-  function setFile(f) {
-    if (!f) return;
-    if (!validName(f)) {
-      result.className = "err"; result.style.display = "block";
-      result.textContent = `Unsupported file type: ${f.name}. Use .html, .htm or .zip.`;
-      return;
-    }
-    result.className = ""; result.style.display = "none";
-    source = { type: "file", f };
-    $("srcurl").value = ""; // last action wins (one-surface-upload-ui D2)
-    renderSource();
-  }
-  function setUrl() {
-    const v = $("srcurl").value.trim();
-    if (v) source = { type: "url", v };
-    else if (source.type === "url") source = { type: null };
-    else return;
-    renderSource();
-  }
-  function clearSource() {
-    source = { type: null };
-    $("srcurl").value = "";
-    renderSource();
-  }
-
-  // The drop handler covers the whole card, so a file dropped on the URL
-  // input area still lands as the file source (one-surface-upload-ui D3).
-  ["dragenter", "dragover"].forEach((ev) =>
-    zone.addEventListener(ev, (e) => { e.preventDefault(); droplayer.classList.add("over"); }));
-  ["dragleave", "drop"].forEach((ev) =>
-    zone.addEventListener(ev, (e) => { e.preventDefault(); droplayer.classList.remove("over"); }));
-  zone.addEventListener("drop", (e) => {
-    const f = e.dataTransfer.files[0];
-    if (f) setFile(f);
-  });
-  $("file").onchange = () => setFile($("file").files[0]);
-  $("srcurl").oninput = setUrl;
-  $("identifier").oninput = updateIdentPreview;
-  renderSource();
-  updateIdentPreview();
-
-  $("go").onclick = async () => {
-    const ident = requireIdent();
-    if (!ident) return;
-    if (!source.type) {
-      result.className = "err"; result.style.display = "block";
-      result.textContent = "Choose a file or enter a URL first.";
-      return;
-    }
-    const fd = new FormData();
-    if (source.type === "url") fd.append("url", source.v);
-    else fd.append("file", source.f);
-    fd.append("identifier", ident);
-    result.className = ""; result.style.display = "block";
-    const go = $("go");
-    go.disabled = true; go.textContent = source.type === "url" ? "Importing…" : "Uploading…";
-    try {
-      const res = await api("/api/pages", { method: "POST", body: fd });
-      // Errors may be JSON (validation, strict gate) or plain text (fetch
-      // failures via http.Error); parse what we can either way.
-      const raw = await res.text();
-      let body = {};
-      try { body = JSON.parse(raw); } catch { body = { message: raw.trim() }; }
-      if (res.status === 201) {
-        // The 201 response carries the ingest counts (upload.go); surface
-        // them here so kept-external doesn't hide until someone opens the
-        // detail view (D8).
-        result.classList.add("ok");
-        const a = body.assets || {};
-        const parts = [];
-        if (a.baked) parts.push(a.baked + " baked");
-        if (a.local) parts.push(a.local + " local");
-        if (a.kept_cdn) parts.push(a.kept_cdn + " kept on CDN");
-        if (a.kept_external) parts.push(a.kept_external + " kept external");
-        const sum = parts.length
-          ? `<div class="sum${a.kept_external ? " warn" : ""}">Assets: ${parts.join(", ")}</div>`
-          : "";
-        result.innerHTML = `Published: <a href='${esc(body.url)}' target="_blank">${esc(body.slug)}</a> — <a href="#/p/${esc(encodeURIComponent(body.slug))}">details</a>${sum}`;
-      } else if (body.error === "import_incomplete") {
-        // The strict gate: show which assets failed and the way out
-        // (import-by-url D5).
-        result.classList.add("err");
-        const items = (body.unresolved || []).map((u) =>
-          `<li><code>${esc(u.url)}</code> — ${esc(u.reason || "unfetchable")}</li>`).join("");
-        result.innerHTML = `${esc(body.message || "Import incomplete.")}` +
-          (items ? `<ul class="unresolved">${items}</ul>` : "");
-      } else {
-        result.classList.add("err");
-        result.textContent = "Error " + res.status + ": " +
-          (body.message || body.error || res.statusText || "upload failed");
-      }
-    } catch (e) {
-      if (e.message === "unauthorized") {
-        result.classList.add("err");
-        result.textContent = AUTH_MODE === "oidc"
-          ? "Session expired — redirecting to login."
-          : "Enter a valid API token first.";
-      } else {
-        result.classList.add("err");
-        result.textContent = "Upload failed: " + e;
-      }
-    } finally {
-      go.disabled = false; go.textContent = "Publish";
-    }
-  };
-}
-
-function route() {
-  flash("");
-  const h = location.hash || "#/";
-  const m = h.match(/^#\/p\/([^/]+)$/);
-  if (m) renderDetail(decodeURIComponent(m[1]));
-  else if (h === "#/upload") renderUpload();
-  else renderList();
-}
-window.addEventListener("hashchange", route);
-route();
-</script>
+</main>
 </body>
 </html>

@@ -17,8 +17,9 @@ context: |
     justified seam (Storage, 4 methods); MinIO in dev via docker compose;
     production vendor deliberately undecided — any S3-compatible endpoint
   - testcontainers-go: real MinIO + Postgres for integration tests
-  - Frontend: one hand-written HTML page, fetch + FormData; no build step,
-    no framework, no npm
+  - Frontend: one hand-written HTML shell + embedded assets (CSS, JS, the
+    vendored Alpine.js CSP build) under internal/serve/static, no build
+    step, no npm; fetch + FormData
 
   Engineering principles (enforced, not aspirational):
   - No over-engineering: ship the smallest thing that satisfies the spec.

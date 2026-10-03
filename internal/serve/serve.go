@@ -7,14 +7,18 @@ package serve
 
 import (
 	"context"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/metric"
@@ -28,7 +32,7 @@ import (
 	"page/internal/upload"
 )
 
-//go:embed static/index.html
+//go:embed static
 var staticFS embed.FS
 
 // Options carries the handler dependencies.
@@ -122,6 +126,7 @@ func New(o Options) http.Handler {
 	// behavior.
 	if o.Mode != config.ModeServe {
 		handleFunc("GET /{$}", h.ui)
+		handleFunc("GET /ui/{file}", h.uiAsset)
 		api()
 		// The browser half of the OIDC flow mounts only when the flow is
 		// actually wired (auth-modes D5): a flowless oidc checker fails
@@ -155,12 +160,43 @@ func ModuleVersion() string {
 const (
 	cacheControlAsset = "public, max-age=31536000, immutable"
 	cacheControlEntry = "public, max-age=60, must-revalidate"
+	// Shell application assets revalidate unconditionally: they are tiny
+	// (admin plane only) and their bytes change with every deploy, so
+	// caching them longer buys nothing but stale-UI bugs (harden-admin-ui D2).
+	cacheControlUIAsset = "no-cache"
 )
+
+// uiContentSecurityPolicy locks the UI shell down to same-origin scripts,
+// styles and connections (harden-admin-ui D3): no inline script or style,
+// nothing from any other origin, nobody frames the admin UI. Enforced, not
+// report-only; the shell and its /ui/* assets are built to satisfy it.
+const uiContentSecurityPolicy = "default-src 'none'; script-src 'self'; " +
+	"style-src 'self'; connect-src 'self'; img-src 'self' data:; " +
+	"base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+
+// setUISecurityHeaders stamps the shell's security headers. writeBytes
+// already sets nosniff for /ui/* responses; setting it here too keeps both
+// shell surfaces stamped by one call.
+func setUISecurityHeaders(w http.ResponseWriter) {
+	w.Header().Set("Content-Security-Policy", uiContentSecurityPolicy)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+}
+
+// validTheme reports whether s is a theme choice the shell understands.
+// Anything else (including "system", the default) injects no attribute so
+// the palette follows prefers-color-scheme (harden-admin-ui D4).
+func validTheme(s string) bool { return s == "light" || s == "dark" }
 
 // ui serves the management shell. In oidc mode an unauthenticated browser is
 // redirected to /login (auth-modes D7); the shell always learns its auth
-// mode from the injected data-auth-mode attribute (auth-modes D8).
+// mode from the injected data-auth-mode attribute (auth-modes D8) and its
+// theme from the injected data-theme attribute (harden-admin-ui D4) — set
+// before first paint from the sp-theme cookie, so the correct palette
+// renders with no flash and no inline script (which the CSP bans).
 func (h *Handler) ui(w http.ResponseWriter, r *http.Request) {
+	// Headers go on every / response, including the oidc redirect an
+	// unauthenticated browser gets — the whole surface is the shell's.
+	setUISecurityHeaders(w)
 	if h.authn != nil && !h.authn.Allow(w, r, auth.KindBrowser) {
 		return
 	}
@@ -175,8 +211,80 @@ func (h *Handler) ui(w http.ResponseWriter, r *http.Request) {
 	}
 	page = []byte(strings.Replace(string(page),
 		`data-auth-mode="token"`, `data-auth-mode="`+mode+`"`, 1))
+	if theme, err := r.Cookie("sp-theme"); err == nil && validTheme(theme.Value) {
+		page = []byte(strings.Replace(string(page),
+			`<html lang="en">`, `<html lang="en" data-theme="`+theme.Value+`">`, 1))
+	}
+	setUISecurityHeaders(w)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(page)
+}
+
+// uiContentTypes pins the asset content types; nosniff makes guesses
+// dangerous, so nothing here sniffs.
+var uiContentTypes = map[string]string{
+	"css": "text/css; charset=utf-8",
+	"js":  "text/javascript; charset=utf-8",
+}
+
+// isVendoredAlpine reports whether the asset is the versioned vendored
+// Alpine build — its name pins the exact upstream release, so its bytes are
+// immutable and it caches forever (harden-admin-ui D2).
+func isVendoredAlpine(name string) bool {
+	return strings.HasPrefix(name, "alpine.csp-") && strings.HasSuffix(name, ".min.js")
+}
+
+// validAssetName admits exactly the shell's asset files — nothing else in
+// the embed is reachable over HTTP.
+func validAssetName(name string) bool {
+	switch name {
+	case "app.css", "app.js":
+		return true
+	default:
+		return isVendoredAlpine(name)
+	}
+}
+
+// uiAsset serves the shell's embedded static assets under /ui/{file}. The
+// path value is one clean segment (no slashes), so nothing outside static/
+// is reachable. Application assets revalidate, since their bytes change
+// with every deploy (harden-admin-ui D2).
+func (h *Handler) uiAsset(w http.ResponseWriter, r *http.Request) {
+	setUISecurityHeaders(w)
+	name := r.PathValue("file")
+	if !validAssetName(name) {
+		http.NotFound(w, r)
+		return
+	}
+	data, err := staticFS.ReadFile("static/" + name)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	ct, ok := uiContentTypes[strings.TrimPrefix(filepath.Ext(name), ".")]
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	cacheControl := cacheControlUIAsset
+	if isVendoredAlpine(name) {
+		cacheControl = cacheControlAsset
+	}
+	h.writeBytes(w, r, data, ct, uiETag(name, data), cacheControl)
+}
+
+// uiETags caches one sha256 per embedded asset: immutable bytes, immutable
+// ETag, computed once per process.
+var uiETags sync.Map // name → etag
+
+func uiETag(name string, data []byte) string {
+	if etag, ok := uiETags.Load(name); ok {
+		return etag.(string)
+	}
+	sum := sha256.Sum256(data)
+	etag := hex.EncodeToString(sum[:16])
+	uiETags.Store(name, etag)
+	return etag
 }
 
 // healthProbeKey is the fixed, unlikely object key StorageProbe stats to prove

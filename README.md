@@ -30,6 +30,12 @@ per page, park/unpark, and permanent delete:
 
 ![Web admin — manage pages](screenshot.png)
 
+The UI ships a light and a dark palette and follows your system's scheme by
+default; the header chip overrides it (light → dark → system), and the
+choice persists:
+
+![Web admin — dark mode](screenshot-dark.png)
+
 On the upload page you can set an identifier, import a page by URL, or
 drop an `.html` file or a `.zip`:
 
